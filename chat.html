@@ -195,18 +195,10 @@
     "founder": "assets/founder.png"
   };
 
-  // Obtener el canal del parámetro URL o pedir al usuario
+  // Obtener el canal del parámetro URL o usar carlogato como default
   function obtenerCanal() {
     const params = new URLSearchParams(window.location.search);
-    let channel = params.get("channel");
-    
-    if (!channel) {
-      channel = prompt("Ingresa el nombre del canal de Kick:");
-      if (!channel) {
-        chatDiv.innerHTML = "❌ Debes ingresar un canal para continuar.";
-        return null;
-      }
-    }
+    let channel = params.get("channel") || "carlogato";
     return channel.toLowerCase().trim();
   }
 
