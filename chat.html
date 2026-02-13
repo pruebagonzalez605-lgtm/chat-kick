@@ -179,11 +179,10 @@
   </section>
 
 <script>
-  const CHANNEL_ID = "361833";
-  const CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
   const chatDiv = document.getElementById("chat");
   let lastMessageId = null;
   let messageIds = new Set();
+  let CHAT_URL = null;
 
   const BADGE_ICONS = {
     "moderator": "assets/moderator.png",
@@ -195,6 +194,59 @@
     "sub_gifter": "assets/sub_gifter.png",
     "founder": "assets/founder.png"
   };
+
+  // Obtener el canal del parámetro URL o pedir al usuario
+  function obtenerCanal() {
+    const params = new URLSearchParams(window.location.search);
+    let channel = params.get("channel");
+    
+    if (!channel) {
+      channel = prompt("Ingresa el nombre del canal de Kick:");
+      if (!channel) {
+        chatDiv.innerHTML = "❌ Debes ingresar un canal para continuar.";
+        return null;
+      }
+    }
+    return channel.toLowerCase().trim();
+  }
+
+  // Buscar el chatroom ID del canal
+  async function obtenerChatroomId(channel) {
+    try {
+      chatDiv.innerHTML = `Buscando canal: <strong>${channel}</strong>...`;
+      const res = await fetch(`https://kick.com/api/v2/channels/${channel}`);
+      
+      if (!res.ok) throw new Error("Canal no encontrado");
+      
+      const data = await res.json();
+      const chatroom_id = data?.data?.chatroom?.id;
+      
+      if (!chatroom_id) throw new Error("No se encontró chatroom ID");
+      
+      console.log(`✅ Canal encontrado: ${channel}`);
+      console.log(`✅ Chatroom ID: ${chatroom_id}`);
+      return chatroom_id;
+    } catch (err) {
+      console.error("❌ Error buscando canal:", err);
+      chatDiv.innerHTML = `❌ Error: No se encontró el canal "${channel}"`;
+      return null;
+    }
+  }
+
+  // Inicializar con el canal
+  async function inicializar() {
+    const channel = obtenerCanal();
+    if (!channel) return;
+    
+    const chatroom_id = await obtenerChatroomId(channel);
+    if (!chatroom_id) return;
+    
+    CHAT_URL = `https://kick.com/api/v2/channels/${channel}/messages`;
+    chatDiv.innerHTML = `Cargando mensajes de <strong>${channel}</strong>...`;
+    
+    fetchMessages();
+    setInterval(fetchMessages, 3000);
+  }
 
   async function fetchMessages() {
     try {
@@ -244,8 +296,7 @@
     chatDiv.scrollTop = chatDiv.scrollHeight;
   }
 
-  fetchMessages();
-  setInterval(fetchMessages, 0);
+  inicializar();
 </script>
 
 </body>
