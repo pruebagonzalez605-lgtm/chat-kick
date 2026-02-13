@@ -786,12 +786,41 @@
       chatDiv.innerHTML = "";
       messageIds.clear();
       
+      // Iniciar polling continuo inmediato
       if (pollInterval) clearInterval(pollInterval);
-      fetchMessages();
-      pollInterval = setInterval(fetchMessages, 0);
+      continuousPoll();
     } catch (err) {
       console.error("Error:", err);
     }
+  }
+  
+  // Polling continuo: hace la siguiente petición inmediatamente después de que termina la anterior
+  async function continuousPoll() {
+    if (!CHAT_URL) return;
+    
+    const startTime = performance.now();
+    
+    try {
+      const data = await smartFetch(CHAT_URL);
+      let messages = data?.data?.messages || data?.messages || [];
+      
+      if (messages && messages.length > 0) {
+        messages.reverse().forEach(m => {
+          if (!messageIds.has(m.id)) {
+            messageIds.add(m.id);
+            addMessage(m);
+          }
+        });
+      }
+    } catch (err) {
+      // Silenciar errores
+    }
+    
+    // Calcular tiempo transcurrido y programar siguiente petición inmediatamente
+    const elapsed = performance.now() - startTime;
+    const delay = Math.max(0, 10 - elapsed); // Mínimo 10ms entre peticiones para no saturar
+    
+    pollInterval = setTimeout(continuousPoll, delay);
   }
 
   // Copiar link al portapapeles
@@ -816,29 +845,6 @@
   channelInput.addEventListener("keypress", (e) => {
     if (e.key === "Enter") loadChat();
   });
-
-  async function fetchMessages() {
-    if (!CHAT_URL || isFetching) return;
-    
-    isFetching = true;
-    try {
-      const data = await smartFetch(CHAT_URL);
-      let messages = data?.data?.messages || data?.messages || [];
-      
-      if (!messages || messages.length === 0) return;
-      
-      messages.reverse().forEach(m => {
-        if (!messageIds.has(m.id)) {
-          messageIds.add(m.id);
-          addMessage(m);
-        }
-      });
-    } catch (err) {
-      // Silent error
-    } finally {
-      isFetching = false;
-    }
-  }
 
   // Auto-cargar si hay parámetro de canal en la URL
   window.addEventListener("DOMContentLoaded", () => {
