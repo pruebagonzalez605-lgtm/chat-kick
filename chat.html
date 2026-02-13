@@ -55,11 +55,16 @@
     }
 
     #chat {
-      width: 100%;
-      height: 100%;
-      border: none;
+      height: auto;
+      overflow-y: auto;
+      padding: 1rem;
+      scrollbar-gutter: stable;
+      scroll-behavior: smooth;
       background: transparent;
       flex-grow: 1;
+      font-size: 20px;
+      display: flex;
+      flex-direction: column;
     }
 
     #chat::-webkit-scrollbar { width: 0px; }
@@ -170,63 +175,77 @@
 
   <section id="chat-section">
     <div class="chat-header">💬 Chat en tiempo real</div>
-    <iframe id="chat" class="chat-iframe" src="" sandbox="allow-scripts allow-same-origin allow-popups" referrerpolicy="no-referrer"></iframe>
+    <div id="chat">Cargando mensajes...</div>
   </section>
 
 <script>
-  // Obtener el canal del parámetro URL o usar carlogato como default
-  function obtenerCanal() {
-    const params = new URLSearchParams(window.location.search);
-    let channel = params.get("channel") || "carlogato";
-    return channel.toLowerCase().trim();
+  const CHANNEL_ID = "361833";
+  const CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
+  const chatDiv = document.getElementById("chat");
+  let lastMessageId = null;
+  let messageIds = new Set();
+
+  const BADGE_ICONS = {
+    "moderator": "assets/moderator.png",
+    "vip": "assets/vip.png",
+    "verified": "assets/verified.png",
+    "broadcaster": "assets/broadcaster.png",
+    "og": "assets/og.png",
+    "subscriber": "assets/subscriber.png",
+    "sub_gifter": "assets/sub_gifter.png",
+    "founder": "assets/founder.png"
+  };
+
+  async function fetchMessages() {
+    try {
+      const res = await fetch(CHAT_URL);
+      if (!res.ok) throw new Error("Error al obtener mensajes");
+      const data = await res.json();
+      const messages = data?.data?.messages;
+      if (!messages) return;
+      
+      messages.reverse().forEach(m => {
+        if (!messageIds.has(m.id)) {
+          messageIds.add(m.id);
+          addMessage(m);
+        }
+      });
+    } catch (err) {
+      console.error("❌ Error cargando mensajes:", err);
+    }
   }
 
-  // Cargar el chat de Kick en el iframe
-  function cargarChat(channel) {
-    const chatIframe = document.getElementById("chat");
-    
-    // Intentar cargar directamente primero
-    const urls = [
-      `https://kick.com/popout/${channel}/chat`,
-      // Si la URL anterior no funciona, tenemos alternativas
-    ];
-    
-    console.log(`Cargando chat de ${channel}...`);
-    chatIframe.src = urls[0];
-    
-    // Esperar y si no carga, mostrar mensaje
-    setTimeout(() => {
-      if (!chatIframe.contentDocument && !chatIframe.contentWindow) {
-        console.warn("El iframe puede estar bloqueado por X-Frame-Options");
-        mostrarAlternativa(channel);
-      }
-    }, 3000);
+  function procesarEmotes(texto) {
+    if (!texto) return "";
+    return texto.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
+      const url = `https://files.kick.com/emotes/${id}/fullsize`;
+      return `<img src="${url}" alt="${nombre}" title="${nombre}" class="emote">`;
+    });
   }
 
-  function mostrarAlternativa(channel) {
-    const chat = document.getElementById("chat-section");
-    chat.innerHTML = `
-      <div class="chat-header">💬 Chat en tiempo real</div>
-      <div style="padding: 2rem; text-align: center; color: #888;">
-        <p>⚠️ El iframe está bloqueado por Kick</p>
-        <p style="margin-top: 1rem; font-size: 14px;">
-          <a href="https://kick.com/popout/${channel}/chat" target="_blank" style="color: #00ff66; text-decoration: none;">
-            👉 Click aquí para abrir el chat en una ventana nueva
-          </a>
-        </p>
-        <p style="margin-top: 2rem; font-size: 12px; color: #666;">
-          O copia este link en OBS como Browser Source:<br>
-          <code style="display: block; margin-top: 0.5rem; padding: 0.5rem; background: #111; border-radius: 4px;">
-            https://kick.com/popout/${channel}/chat
-          </code>
-        </p>
-      </div>
-    `;
+  function generarBadges(m) {
+    const badges = m.identity?.badges || m.sender?.identity?.badges || [];
+    if (!Array.isArray(badges) || badges.length === 0) return "";
+    return badges.map(b => {
+      const tipo = b.type?.toLowerCase();
+      const icon = BADGE_ICONS[tipo];
+      return icon ? `<img src="${icon}" alt="${tipo}" title="${b.text}" class="badge-icon">` : "";
+    }).join("");
   }
 
-  // Inicializar
-  const channel = obtenerCanal();
-  cargarChat(channel);
+  function addMessage(m) {
+    const color = m.identity?.color || m.sender?.identity?.color || "#00ff66";
+    const username = m.sender?.username || "Anónimo";
+    const badgesHTML = generarBadges(m);
+    const msg = document.createElement("div");
+    msg.className = "msg";
+    msg.innerHTML = `<span class="meta"><span class="user" style="color:${color}">${badgesHTML}${username}</span></span><span class="text">${procesarEmotes(m.content)}</span>`;
+    chatDiv.appendChild(msg);
+    chatDiv.scrollTop = chatDiv.scrollHeight;
+  }
+
+  fetchMessages();
+  setInterval(fetchMessages, 0);
 </script>
 
 </body>
