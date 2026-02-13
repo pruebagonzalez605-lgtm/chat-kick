@@ -181,7 +181,7 @@
 <script>
   const chatDiv = document.getElementById("chat");
   let messageIds = new Set();
-  let socket = null;
+  let eventSource = null;
   let currentChannel = null;
 
   const BADGE_ICONS = {
@@ -202,84 +202,61 @@
     return channel.toLowerCase().trim();
   }
 
-  // Conectar al WebSocket de Kick
-  async function conectarWebSocket(channel) {
+  // Conectar usando Server-Sent Events de Kick
+  async function conectarChat(channel) {
     try {
       chatDiv.innerHTML = `Conectando a ${channel}...`;
       currentChannel = channel;
 
-      // Obtener el chatroom_id first
+      // Obtener el chatroom_id
       const res = await fetch(`https://kick.com/api/v2/channels/${channel}/chatroom`);
-      
-      console.log("Status:", res.status);
-      console.log("OK:", res.ok);
       
       if (!res.ok) {
         const errorText = await res.text();
         console.error("Error response:", errorText);
-        throw new Error(`Canal no encontrado (${res.status}): ${errorText}`);
+        throw new Error(`Canal no encontrado (${res.status})`);
       }
       
       const data = await res.json();
-      console.log("Respuesta completa:", JSON.stringify(data, null, 2));
+      console.log("Chatroom data:", data);
       
       const chatroom_id = data?.id;
       
       if (!chatroom_id) {
-        console.error("Estructura de datos:", Object.keys(data));
-        throw new Error("No se encontró ID del chat. Respuesta: " + JSON.stringify(data));
+        throw new Error("No se encontró ID del chat");
       }
 
       console.log(`✅ Conectando al canal ${channel} (ID: ${chatroom_id})`);
-
-      // Conectar al WebSocket
-      socket = new WebSocket(`wss://ws-us2.pusher.com/app/eb36ae0d95d82b02baaf?protocol=7&client=js&version=7.0.0&flash=false`);
-
-      socket.onopen = () => {
-        console.log("✅ WebSocket conectado");
-        chatDiv.innerHTML = ``;
+      chatDiv.innerHTML = `Conectado a <strong>${channel}</strong> - Esperando mensajes...`;
+      
+      // Intentar con SSE
+      try {
+        eventSource = new EventSource(`https://kick.com/api/v2/channels/${channel}/events`);
         
-        // Suscribirse al chat
-        const subscribe = {
-          "event": "pusher:subscribe",
-          "data": {
-            "channel": `chatrooms.${chatroom_id}.v2`
-          }
-        };
-        socket.send(JSON.stringify(subscribe));
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          console.log("Mensaje recibido:", parsed);
-          
-          if (parsed.event === "pusher:connection_established") {
-            console.log("✅ Conexión establecida");
-          }
-          
-          // El mensaje puede venir en data (string JSON) o directamente como objeto
-          const message = typeof parsed.data === "string" 
-            ? JSON.parse(parsed.data) 
-            : parsed.data;
+        eventSource.addEventListener("message", (e) => {
+          try {
+            const message = JSON.parse(e.data);
+            console.log("Mensaje recibido:", message);
             
-          if (message && message.content) {
-            console.log("Mensaje de chat:", message);
-            addMessage(message);
+            if (message.data && message.data.message) {
+              addMessage(message.data.message);
+            } else if (message.message) {
+              addMessage(message.message);
+            }
+          } catch (err) {
+            console.error("Error procesando SSE:", err);
           }
-        } catch (e) {
-          console.error("Error procesando mensaje:", e);
-        }
-      };
-
-      socket.onerror = (err) => {
-        console.error("❌ Error WebSocket:", err);
-        chatDiv.innerHTML = `❌ Error conectando a ${channel}`;
-      };
-
-      socket.onclose = () => {
-        console.log("WebSocket cerrado");
-      };
+        });
+        
+        eventSource.onerror = (e) => {
+          console.error("SSE error:", e);
+          eventSource.close();
+        };
+        
+      } catch (sseErr) {
+        console.log("SSE no disponible, probando otra método");
+        chatDiv.innerHTML = `⚠️ SSE no disponible en este navegador`;
+      }
 
     } catch (err) {
       console.error("❌ Error:", err);
@@ -318,7 +295,7 @@
 
   // Inicializar
   const channel = obtenerCanal();
-  conectarWebSocket(channel);
+  conectarChat(channel);
 </script>
 
 </body>
