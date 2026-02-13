@@ -225,9 +225,14 @@
   // Proxy CORS
   const CORS_PROXY = "https://corsproxy.io/?";
   
+  // WebSocket de Pusher para tiempo real
+  const PUSHER_WS_URL = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=7.6.0&flash=false";
+  
   let CHANNEL_ID = null;
+  let CHATROOM_ID = null;
   let CHAT_URL = null;
   let currentChannel = null;
+  let kickWS = null;
   const chatDiv = document.getElementById("chat");
   const inputContainer = document.getElementById("channel-input-container");
   const channelInput = document.getElementById("channel-name-input");
@@ -788,6 +793,7 @@
     try {
       const result = await getChannelId(channelName);
       CHANNEL_ID = result.channelId;
+      CHATROOM_ID = result.chatroomId;
       currentChannel = channelName;
       CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
       
@@ -801,10 +807,10 @@
         chatDiv.style.display = "flex";
       } else {
         if (result.isLive) {
-          statusMsg.textContent = `🔴 EN VIVO: ${channelName} (Channel ID: ${CHANNEL_ID})`;
+          statusMsg.textContent = `🔴 EN VIVO: ${channelName} (WebSocket Real-Time)`;
           statusMsg.style.color = "#53fc18";
         } else {
-          statusMsg.textContent = `⚫ OFFLINE: ${channelName} (Channel ID: ${CHANNEL_ID}) - Esperando mensajes...`;
+          statusMsg.textContent = `⚫ OFFLINE: ${channelName} - Esperando mensajes...`;
           statusMsg.style.color = "#ffaa00";
         }
         
@@ -820,16 +826,109 @@
       chatDiv.innerHTML = "";
       messageIds.clear();
       
-      // Iniciar polling continuo inmediato
-      if (pollInterval) clearTimeout(pollInterval);
-      continuousPoll();
+      // Conectar WebSocket para tiempo real
+      connectWebSocket();
+      
+      // También hacer polling inicial para cargar mensajes existentes
+      fetchInitialMessages();
     } catch (err) {
       console.error("Error:", err);
     }
   }
   
-  // Polling ultra-rápido: hace la siguiente petición inmediatamente después de que termina la anterior
-  async function continuousPoll() {
+  // ============ WEBSOCKET PARA TIEMPO REAL ============
+  function connectWebSocket() {
+    if (kickWS) {
+      kickWS.close();
+    }
+    
+    kickWS = new WebSocket(PUSHER_WS_URL);
+    
+    kickWS.addEventListener("open", () => {
+      console.log("WebSocket conectado a Pusher");
+      // Suscribirse al chatroom
+      kickWS.send(JSON.stringify({
+        event: "pusher:subscribe",
+        data: { auth: "", channel: `chatrooms.${CHATROOM_ID}.v2` }
+      }));
+    });
+    
+    kickWS.addEventListener("message", (event) => {
+      try {
+        const messageData = JSON.parse(event.data);
+        
+        // Manejar mensajes de chat
+        if (messageData.event === "App\\Events\\ChatMessageEvent") {
+          const chatMessageData = JSON.parse(messageData.data);
+          handleChatMessage(chatMessageData);
+        }
+        
+        // Manejar mensajes eliminados
+        if (messageData.event === "App\\Events\\MessageDeletedEvent") {
+          const deleteData = JSON.parse(messageData.data);
+          removeMessage(deleteData.message.id);
+        }
+        
+        // Manejar usuarios baneados
+        if (messageData.event === "App\\Events\\UserBannedEvent") {
+          const banData = JSON.parse(messageData.data);
+          removeUserMessages(banData.user.id);
+        }
+      } catch (err) {
+        // Ignorar errores de parsing
+      }
+    });
+    
+    kickWS.addEventListener("error", () => {
+      console.log("WebSocket error, reconectando...");
+      setTimeout(connectWebSocket, 1000);
+    });
+    
+    kickWS.addEventListener("close", () => {
+      console.log("WebSocket cerrado, reconectando...");
+      setTimeout(connectWebSocket, 1000);
+    });
+  }
+  
+  // Manejar mensaje de chat recibido por WebSocket
+  function handleChatMessage(data) {
+    if (messageIds.has(data.id)) return;
+    messageIds.add(data.id);
+    
+    // Crear objeto de mensaje compatible con el formato anterior
+    const message = {
+      id: data.id,
+      content: data.content,
+      sender: {
+        id: data.sender.id,
+        username: data.sender.username,
+        identity: {
+          color: data.sender.identity?.color || "#00ff66",
+          badges: data.sender.identity?.badges || []
+        }
+      },
+      identity: data.sender.identity
+    };
+    
+    addMessage(message);
+  }
+  
+  // Eliminar mensaje específico
+  function removeMessage(messageId) {
+    const msgElement = document.getElementById(messageId);
+    if (msgElement) {
+      msgElement.remove();
+    }
+  }
+  
+  // Eliminar todos los mensajes de un usuario
+  function removeUserMessages(userId) {
+    const messages = document.querySelectorAll(`[data-user-id="${userId}"]`);
+    messages.forEach(msg => msg.remove());
+  }
+  
+  // Obtener mensajes iniciales
+  async function fetchInitialMessages() {
     if (!CHAT_URL) return;
     
     try {
@@ -847,9 +946,6 @@
     } catch (err) {
       // Silenciar errores
     }
-    
-    // Inmediatamente la siguiente petición (0ms delay)
-    pollInterval = setTimeout(continuousPoll, 0);
   }
 
   // Copiar link al portapapeles
@@ -886,12 +982,16 @@
 
   function addMessage(m) {
     const username = m.sender?.username || "Anónimo";
+    const userId = m.sender?.id || "";
+    const messageId = m.id || "";
     const badgesHTML = generateBadges(m);
     const nameStyle = generateNamePaint(m);
     const processedContent = processEmotes(m.content);
     
     const msg = document.createElement("div");
     msg.className = "msg";
+    msg.id = messageId;
+    msg.setAttribute("data-user-id", userId);
     msg.innerHTML = `<span class="meta"><span class="user" style="${nameStyle}">${badgesHTML}${username}</span></span><span class="text">${processedContent}</span>`;
     chatDiv.appendChild(msg);
     chatDiv.scrollTop = chatDiv.scrollHeight;
