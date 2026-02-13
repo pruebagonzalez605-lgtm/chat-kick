@@ -240,6 +240,7 @@
   let messageIds = new Set();
   let pollInterval = null;
   let isFetching = false;
+  let abortController = null;
 
   // ============ EMOTES & BADGES STORAGE ============
   let emotesData = {
@@ -281,33 +282,66 @@
     return `${baseUrl}?channel=${encodeURIComponent(channelName)}`;
   }
 
-  async function fetchDirect(url) {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    });
-    return await res.json();
-  }
-
-  async function fetchWithProxy(url) {
-    const proxyUrl = CORS_PROXY + encodeURIComponent(url);
-    const res = await fetch(proxyUrl);
-    return await res.json();
-  }
-
-  async function smartFetch(url) {
+  // Fetch directo optimizado con timeout
+  async function fetchDirect(url, timeout = 5000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
     try {
-      return await fetchDirect(url);
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal,
+        cache: 'no-store',
+        mode: 'cors'
+      });
+      clearTimeout(timeoutId);
+      return await res.json();
     } catch (err) {
-      return await fetchWithProxy(url);
+      clearTimeout(timeoutId);
+      throw err;
     }
   }
+
+  // Fetch con proxy optimizado
+  async function fetchWithProxy(url, timeout = 5000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    try {
+      const proxyUrl = "https://corsproxy.io/?" + encodeURIComponent(url);
+      const res = await fetch(proxyUrl, {
+        signal: controller.signal,
+        cache: 'no-store'
+      });
+      clearTimeout(timeoutId);
+      return await res.json();
+    } catch (err) {
+      clearTimeout(timeoutId);
+      throw err;
+    }
+  }
+
+  // Fetch con race: intenta ambos métodos y usa el primero que responda
+  async function raceFetch(url) {
+    return Promise.race([
+      fetchDirect(url).catch(() => null),
+      fetchWithProxy(url).catch(() => null)
+    ]).then(result => {
+      if (result) return result;
+      // Si ambos fallaron, intentar de nuevo con proxy
+      return fetchWithProxy(url);
+    });
+  }
+
+  // Alias para compatibilidad
+  const smartFetch = raceFetch;
 
   // ============ LOAD FFZ EMOTES & BADGES ============
   async function loadFFZData(twitchId = null) {
     try {
       // FFZ Global Emotes
-      const globalData = await smartFetch("https://api.frankerfacez.com/v1/set/global");
+      const globalData = await raceFetch("https://api.frankerfacez.com/v1/set/global");
       if (globalData.sets) {
         Object.values(globalData.sets).forEach(set => {
           set.emoticons.forEach(emote => {
@@ -787,21 +821,19 @@
       messageIds.clear();
       
       // Iniciar polling continuo inmediato
-      if (pollInterval) clearInterval(pollInterval);
+      if (pollInterval) clearTimeout(pollInterval);
       continuousPoll();
     } catch (err) {
       console.error("Error:", err);
     }
   }
   
-  // Polling continuo: hace la siguiente petición inmediatamente después de que termina la anterior
+  // Polling ultra-rápido: hace la siguiente petición inmediatamente después de que termina la anterior
   async function continuousPoll() {
     if (!CHAT_URL) return;
     
-    const startTime = performance.now();
-    
     try {
-      const data = await smartFetch(CHAT_URL);
+      const data = await raceFetch(CHAT_URL);
       let messages = data?.data?.messages || data?.messages || [];
       
       if (messages && messages.length > 0) {
@@ -816,11 +848,8 @@
       // Silenciar errores
     }
     
-    // Calcular tiempo transcurrido y programar siguiente petición inmediatamente
-    const elapsed = performance.now() - startTime;
-    const delay = Math.max(0, 10 - elapsed); // Mínimo 10ms entre peticiones para no saturar
-    
-    pollInterval = setTimeout(continuousPoll, delay);
+    // Inmediatamente la siguiente petición (0ms delay)
+    pollInterval = setTimeout(continuousPoll, 0);
   }
 
   // Copiar link al portapapeles
