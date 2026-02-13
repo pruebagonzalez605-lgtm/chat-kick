@@ -206,7 +206,7 @@
   async function obtenerChatroomId(channel) {
     try {
       chatDiv.innerHTML = `Buscando canal: <strong>${channel}</strong>...`;
-      const res = await fetch(`https://kick.com/api/v2/channels/${channel}`);
+      const res = await fetch(`https://kick.com/api/v2/channels/${channel}/chatroom`);
       
       if (!res.ok) throw new Error("Canal no encontrado");
       
