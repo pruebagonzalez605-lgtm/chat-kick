@@ -180,9 +180,9 @@
 
 <script>
   const chatDiv = document.getElementById("chat");
-  let lastMessageId = null;
   let messageIds = new Set();
-  let CHAT_URL = null;
+  let socket = null;
+  let currentChannel = null;
 
   const BADGE_ICONS = {
     "moderator": "assets/moderator.png",
@@ -202,57 +202,71 @@
     return channel.toLowerCase().trim();
   }
 
-  // Buscar el chatroom ID del canal
-  async function obtenerChatroomId(channel) {
+  // Conectar al WebSocket de Kick
+  async function conectarWebSocket(channel) {
     try {
-      chatDiv.innerHTML = `Buscando canal: <strong>${channel}</strong>...`;
+      chatDiv.innerHTML = `Conectando a ${channel}...`;
+      currentChannel = channel;
+
+      // Obtener el chatroom_id first
       const res = await fetch(`https://kick.com/api/v2/channels/${channel}/chatroom`);
-      
       if (!res.ok) throw new Error("Canal no encontrado");
       
       const data = await res.json();
-      console.log("Respuesta de API:", data);
+      const chatroom_id = data?.data?.id;
       
-      // El canal ya tiene el nombre, solo verificar que existe
-      return channel;
-    } catch (err) {
-      console.error("❌ Error buscando canal:", err);
-      chatDiv.innerHTML = `❌ Error: No se encontró el canal "${channel}"`;
-      return null;
-    }
-  }
+      if (!chatroom_id) throw new Error("No se encontró ID del chat");
 
-  // Inicializar con el canal
-  async function inicializar() {
-    const channel = obtenerCanal();
-    if (!channel) return;
-    
-    const chatroom_id = await obtenerChatroomId(channel);
-    if (!chatroom_id) return;
-    
-    CHAT_URL = `https://kick.com/api/v2/channels/${channel}/messages`;
-    chatDiv.innerHTML = `Cargando mensajes de <strong>${channel}</strong>...`;
-    
-    fetchMessages();
-    setInterval(fetchMessages, 3000);
-  }
+      console.log(`✅ Conectando al canal ${channel} (ID: ${chatroom_id})`);
 
-  async function fetchMessages() {
-    try {
-      const res = await fetch(CHAT_URL);
-      if (!res.ok) throw new Error("Error al obtener mensajes");
-      const data = await res.json();
-      const messages = data?.data?.messages;
-      if (!messages) return;
-      
-      messages.reverse().forEach(m => {
-        if (!messageIds.has(m.id)) {
-          messageIds.add(m.id);
-          addMessage(m);
+      // Conectar al WebSocket
+      socket = new WebSocket(`wss://ws-us2.pusher.com/app/eb36ae0d95d82b02baaf?protocol=7&client=js&version=7.0.0&flash=false`);
+
+      socket.onopen = () => {
+        console.log("✅ WebSocket conectado");
+        chatDiv.innerHTML = ``;
+        
+        // Suscribirse al chat
+        const subscribe = {
+          "event": "pusher:subscribe",
+          "data": {
+            "channel": `chatrooms.${chatroom_id}.v2`
+          }
+        };
+        socket.send(JSON.stringify(subscribe));
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+          
+          if (parsed.event === "pusher:connection_established") {
+            console.log("✅ Conexión establecida");
+          }
+          
+          if (parsed.data) {
+            const message = JSON.parse(parsed.data);
+            if (message.content) {
+              addMessage(message);
+            }
+          }
+        } catch (e) {
+          console.error("Error procesando mensaje:", e);
         }
-      });
+      };
+
+      socket.onerror = (err) => {
+        console.error("❌ Error WebSocket:", err);
+        chatDiv.innerHTML = `❌ Error conectando a ${channel}`;
+      };
+
+      socket.onclose = () => {
+        console.log("WebSocket cerrado");
+      };
+
     } catch (err) {
-      console.error("❌ Error cargando mensajes:", err);
+      console.error("❌ Error:", err);
+      chatDiv.innerHTML = `❌ Error: ${err.message}`;
     }
   }
 
@@ -285,7 +299,9 @@
     chatDiv.scrollTop = chatDiv.scrollHeight;
   }
 
-  inicializar();
+  // Inicializar
+  const channel = obtenerCanal();
+  conectarWebSocket(channel);
 </script>
 
 </body>
