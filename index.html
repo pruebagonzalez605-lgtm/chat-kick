@@ -185,7 +185,6 @@
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
-
   </style>
 </head>
 <body>
@@ -251,7 +250,7 @@
   let emotesData = {
     ffz: { global: {}, channel: {} },
     bttv: { global: {}, channel: {}, shared: {} },
-    seventv: { global: {}, channel: {} }
+    seventv: { global: {}, channel: {}, community: {} }  // ← Nuevo: para sets comunitarios Kick
   };
 
   let badgesData = {
@@ -276,6 +275,15 @@
     "founder": "assets/founder.png"
   };
 
+  // Sets comunitarios populares de 7TV para Kick (actualizados 2026)
+  const KICK_7TV_COMMUNITY_SETS = [
+    "64bd1aeefb581ca4e4d1c5a4",   // Kick Emotes grande (~389 emotes)
+    "649df73544072d07d1bd4b2f",   // Otro set Kick muy usado
+    "64b612914ae15b9f6a6265e2",   // Variante Kick con emotes clásicos
+    "01HTTD778R000E3Y75DEQDXPKB",   // Variante Kick con canal carlogato
+    // Puedes agregar más IDs buscando "Kick" en https://7tv.app/emote-sets
+  ];
+
   // ============ FETCH HELPERS ============
   function getUrlParams() {
     const params = new URLSearchParams(window.location.search);
@@ -287,7 +295,6 @@
     return `${baseUrl}?channel=${encodeURIComponent(channelName)}`;
   }
 
-  // Fetch directo optimizado con timeout
   async function fetchDirect(url, timeout = 5000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -308,13 +315,12 @@
     }
   }
 
-  // Fetch con proxy optimizado
   async function fetchWithProxy(url, timeout = 5000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
     
     try {
-      const proxyUrl = "https://corsproxy.io/?" + encodeURIComponent(url);
+      const proxyUrl = CORS_PROXY + encodeURIComponent(url);
       const res = await fetch(proxyUrl, {
         signal: controller.signal,
         cache: 'no-store'
@@ -327,25 +333,21 @@
     }
   }
 
-  // Fetch con race: intenta ambos métodos y usa el primero que responda
   async function raceFetch(url) {
     return Promise.race([
       fetchDirect(url).catch(() => null),
       fetchWithProxy(url).catch(() => null)
     ]).then(result => {
       if (result) return result;
-      // Si ambos fallaron, intentar de nuevo con proxy
       return fetchWithProxy(url);
     });
   }
 
-  // Alias para compatibilidad
   const smartFetch = raceFetch;
 
   // ============ LOAD FFZ EMOTES & BADGES ============
   async function loadFFZData(twitchId = null) {
     try {
-      // FFZ Global Emotes
       const globalData = await raceFetch("https://api.frankerfacez.com/v1/set/global");
       if (globalData.sets) {
         Object.values(globalData.sets).forEach(set => {
@@ -362,7 +364,6 @@
         });
       }
 
-      // FFZ Room Emotes (if we have a Twitch ID)
       if (twitchId) {
         try {
           const roomData = await smartFetch(`https://api.frankerfacez.com/v1/room/id/${twitchId}`);
@@ -383,7 +384,6 @@
         } catch (e) {}
       }
 
-      // FFZ Badges
       const badgesDataFfz = await smartFetch("https://api.frankerfacez.com/v1/badges");
       if (badgesDataFfz.badges) {
         badgesDataFfz.badges.forEach(badge => {
@@ -393,7 +393,6 @@
             color: badge.color
           };
         });
-        // Store user-badge mappings
         if (badgesDataFfz.users) {
           Object.entries(badgesDataFfz.users).forEach(([badgeId, users]) => {
             users.forEach(username => {
@@ -411,7 +410,6 @@
   // ============ LOAD BTTV EMOTES & BADGES ============
   async function loadBTTVData(twitchId = null) {
     try {
-      // BTTV Global Emotes
       const globalData = await smartFetch("https://api.betterttv.net/3/cached/emotes/global");
       globalData.forEach(emote => {
         emotesData.bttv.global[emote.code] = {
@@ -422,7 +420,6 @@
         };
       });
 
-      // BTTV Channel Emotes
       if (twitchId) {
         try {
           const channelData = await smartFetch(`https://api.betterttv.net/3/cached/users/twitch/${twitchId}`);
@@ -449,32 +446,31 @@
         } catch (e) {}
       }
 
-      // BTTV Badges
-      try {
-        const badgesDataBttv = await smartFetch("https://api.betterttv.net/3/cached/badges");
-        badgesDataBttv.forEach(badge => {
-          badgesData.bttv[badge.id] = {
-            name: badge.name,
-            url: `https://cdn.betterttv.net/badge/${badge.id}/2x`,
-            provider: badge.provider
-          };
-        });
-      } catch (e) {}
+      const badgesDataBttv = await smartFetch("https://api.betterttv.net/3/cached/badges");
+      badgesDataBttv.forEach(badge => {
+        badgesData.bttv[badge.id] = {
+          name: badge.name,
+          url: `https://cdn.betterttv.net/badge/${badge.id}/2x`,
+          provider: badge.provider
+        };
+      });
     } catch (e) {
       console.warn("BTTV data load error:", e);
     }
   }
 
-  // ============ LOAD 7TV EMOTES, BADGES & NAME PAINTS ============
+  // ============ LOAD 7TV GLOBAL + CHANNEL ============
   async function load7TVData(twitchId = null) {
     try {
-      // 7TV Global Emotes
       const globalData = await smartFetch("https://7tv.io/v3/emote-sets/global");
       if (globalData.emotes) {
         globalData.emotes.forEach(emote => {
           const host = emote.data.host;
           const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-          emotesData.seventv.global[emote.name] = {
+          if (!file) return;
+          const code = emote.name;
+          if (emotesData.seventv.global[code]) return;
+          emotesData.seventv.global[code] = {
             id: emote.id,
             url: `https:${host.url}/${file.name}`,
             url2x: `https:${host.url}/${host.files[1]?.name || file.name}`,
@@ -485,7 +481,6 @@
         });
       }
 
-      // 7TV Channel Emotes & Name Paints
       if (twitchId) {
         try {
           const userData = await smartFetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
@@ -493,7 +488,9 @@
             userData.emote_set.emotes.forEach(emote => {
               const host = emote.data.host;
               const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-              emotesData.seventv.channel[emote.name] = {
+              if (!file) return;
+              const code = emote.name;
+              emotesData.seventv.channel[code] = {
                 id: emote.id,
                 url: `https:${host.url}/${file.name}`,
                 url2x: `https:${host.url}/${host.files[1]?.name || file.name}`,
@@ -504,7 +501,6 @@
             });
           }
 
-          // 7TV Name Paints
           if (userData.user?.style?.paints) {
             userData.user.style.paints.forEach(paint => {
               namePaints[userData.user.id] = {
@@ -517,30 +513,52 @@
           }
         } catch (e) {}
       }
-
-      // 7TV Badges (Cosmetics)
-      try {
-        const cosmeticsData = await smartFetch("https://7tv.io/v3/cosmetics?user_identifiers=1");
-        if (cosmeticsData.badges) {
-          cosmeticsData.badges.forEach(badge => {
-            badgesData.seventv[badge.id] = {
-              name: badge.name,
-              url: `https://cdn.7tv.app/badge/${badge.id}/2x`,
-              tooltip: badge.tooltip
-            };
-          });
-          // Store user-badge mappings
-          if (cosmeticsData.user_badges) {
-            cosmeticsData.user_badges.forEach(ub => {
-              const key = ub.platform === 'TWITCH' ? `tw:${ub.id}` : ub.id;
-              if (!badgesData.seventv[key]) badgesData.seventv[key] = [];
-              badgesData.seventv[key].push(ub.badge_id);
-            });
-          }
-        }
-      } catch (e) {}
     } catch (e) {
-      console.warn("7TV data load error:", e);
+      console.warn("7TV global/channel load error:", e);
+    }
+  }
+
+  // ============ NUEVO: LOAD 7TV COMMUNITY SETS PARA KICK ============
+  async function load7TVCommunitySets() {
+    statusMsg.textContent = "Cargando sets comunitarios de 7TV para Kick...";
+    let totalLoaded = 0;
+
+    for (const setId of KICK_7TV_COMMUNITY_SETS) {
+      try {
+        const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
+        if (!data?.emotes?.length) continue;
+
+        let setLoaded = 0;
+        data.emotes.forEach(emote => {
+          const host = emote.data.host;
+          const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
+          if (!file) return;
+
+          const code = emote.name;
+          // Prioridad: no sobreescribir si ya existe en channel o global
+          if (emotesData.seventv.channel[code] || emotesData.seventv.global[code]) return;
+
+          emotesData.seventv.community[code] = {
+            id: emote.id,
+            url: `https:${host.url}/${file.name}`,
+            url2x: `https:${host.url}/${host.files[1]?.name || file.name}`,
+            width: emote.data.width?.[0] || 32,
+            height: emote.data.height?.[0] || 32,
+            zero_width: emote.data.flags === 1 || emote.data.flags === 3
+          };
+          setLoaded++;
+          totalLoaded++;
+        });
+
+        console.log(`Set 7TV ${setId} → ${setLoaded} emotes nuevos`);
+      } catch (err) {
+        console.warn(`Error cargando set 7TV ${setId}:`, err);
+      }
+    }
+
+    console.log(`Total emotes 7TV comunitarios cargados: ${totalLoaded}`);
+    if (totalLoaded > 0) {
+      statusMsg.textContent += ` (${totalLoaded} emotes 7TV Kick cargados)`;
     }
   }
 
@@ -556,7 +574,6 @@
             url2x: badge.image2,
             users: badge.users || []
           };
-          // Store user mappings
           badge.users?.forEach(username => {
             const key = username.toLowerCase();
             if (!badgesData.chatterino[key]) badgesData.chatterino[key] = [];
@@ -581,7 +598,6 @@
             color: badge.color
           };
         });
-        // Store user mappings
         if (data.users) {
           Object.entries(data.users).forEach(([badgeId, users]) => {
             users.forEach(username => {
@@ -599,54 +615,53 @@
 
   // ============ LOAD ALL THIRD PARTY DATA ============
   async function loadAllThirdPartyData(twitchId = null) {
-    statusMsg.textContent = "Cargando emotes y badges de terceros...";
+    statusMsg.textContent = "Cargando emotes y badges de terceros (incluyendo 7TV Kick)...";
     
     await Promise.all([
       loadFFZData(twitchId),
       loadBTTVData(twitchId),
       load7TVData(twitchId),
+      load7TVCommunitySets(),
       loadChatterinoBadges(),
       loadFFZAPBadges()
     ]);
     
-    console.log("Emotes loaded:", {
+    console.log("Emotes cargados total:", {
       ffz: Object.keys(emotesData.ffz.global).length + Object.keys(emotesData.ffz.channel).length,
       bttv: Object.keys(emotesData.bttv.global).length + Object.keys(emotesData.bttv.channel).length + Object.keys(emotesData.bttv.shared).length,
-      seventv: Object.keys(emotesData.seventv.global).length + Object.keys(emotesData.seventv.channel).length
+      seventv: Object.keys(emotesData.seventv.global).length + 
+               Object.keys(emotesData.seventv.channel).length + 
+               Object.keys(emotesData.seventv.community).length
     });
   }
 
-  // ============ PROCESS EMOTES IN TEXT ============
+  // ============ PROCESS EMOTES (prioridad: channel > community > global) ============
   function processEmotes(text, zeroWidthEmotes = []) {
     if (!text) return "";
     
-    // First process Kick emotes
     let result = text.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
       return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${nombre}" title="${nombre}" class="emote">`;
     });
 
-    // Build emote map with priority: Channel > Global
     const allEmotes = {
-      ...emotesData.seventv.global,
-      ...emotesData.bttv.global,
-      ...emotesData.ffz.global,
-      ...emotesData.bttv.shared,
-      ...emotesData.ffz.channel,
+      ...emotesData.seventv.channel,      // 1. Canal (si llega a cargar)
+      ...emotesData.seventv.community,    // 2. Sets comunitarios Kick (lo principal)
+      ...emotesData.seventv.global,       // 3. Globales 7TV
       ...emotesData.bttv.channel,
-      ...emotesData.seventv.channel
+      ...emotesData.bttv.shared,
+      ...emotesData.bttv.global,
+      ...emotesData.ffz.channel,
+      ...emotesData.ffz.global
     };
 
-    // Sort emotes by length (longest first) to avoid partial matches
     const sortedEmotes = Object.entries(allEmotes).sort((a, b) => b[0].length - a[0].length);
 
-    // Process each emote
     sortedEmotes.forEach(([code, emote]) => {
       const regex = new RegExp(`\\b${escapeRegex(code)}\\b`, 'g');
       const isZeroWidth = emote.zero_width;
       
       result = result.replace(regex, (match) => {
-        const emoteHtml = `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZeroWidth ? ' emote-zero-width' : ''}">`;
-        return emoteHtml;
+        return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZeroWidth ? ' emote-zero-width' : ''}">`;
       });
     });
 
@@ -665,7 +680,6 @@
     
     let badgeHtml = "";
 
-    // Kick badges first
     if (Array.isArray(badges)) {
       badges.forEach(b => {
         const tipo = b.type?.toLowerCase();
@@ -676,7 +690,6 @@
       });
     }
 
-    // 7TV Badges
     const seventvUserBadges = badgesData.seventv[`tw:${userId}`] || badgesData.seventv[username] || [];
     seventvUserBadges.forEach(badgeId => {
       const badge = badgesData.seventv[badgeId];
@@ -685,7 +698,6 @@
       }
     });
 
-    // FFZ Badges
     const ffzUserBadges = badgesData.ffz[username] || [];
     ffzUserBadges.forEach(badgeId => {
       const badge = badgesData.ffz[badgeId];
@@ -694,14 +706,6 @@
       }
     });
 
-    // BTTV Badges
-    Object.entries(badgesData.bttv).forEach(([key, badge]) => {
-      if (typeof badge === 'object' && badge.provider === badge.provider) {
-        // Check if user has this badge
-      }
-    });
-
-    // Chatterino Badges
     const chatterinoUserBadges = badgesData.chatterino[username] || [];
     chatterinoUserBadges.forEach(badgeId => {
       const badge = badgesData.chatterino[badgeId];
@@ -710,7 +714,6 @@
       }
     });
 
-    // FFZ:AP Badges
     const ffzapUserBadges = badgesData.ffzap[username] || [];
     ffzapUserBadges.forEach(badgeId => {
       const badge = badgesData.ffzap[badgeId];
@@ -797,7 +800,6 @@
       currentChannel = channelName;
       CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
       
-      // Load third party emotes and badges
       await loadAllThirdPartyData();
       
       const isChatOnlyMode = getUrlParams() !== null;
@@ -826,17 +828,13 @@
       chatDiv.innerHTML = "";
       messageIds.clear();
       
-      // Conectar WebSocket para tiempo real
       connectWebSocket();
-      
-      // También hacer polling inicial para cargar mensajes existentes
       fetchInitialMessages();
     } catch (err) {
       console.error("Error:", err);
     }
   }
-  
-  // ============ WEBSOCKET PARA TIEMPO REAL ============
+
   function connectWebSocket() {
     if (kickWS) {
       kickWS.close();
@@ -846,7 +844,6 @@
     
     kickWS.addEventListener("open", () => {
       console.log("WebSocket conectado a Pusher");
-      // Suscribirse al chatroom
       kickWS.send(JSON.stringify({
         event: "pusher:subscribe",
         data: { auth: "", channel: `chatrooms.${CHATROOM_ID}.v2` }
@@ -857,26 +854,21 @@
       try {
         const messageData = JSON.parse(event.data);
         
-        // Manejar mensajes de chat
         if (messageData.event === "App\\Events\\ChatMessageEvent") {
           const chatMessageData = JSON.parse(messageData.data);
           handleChatMessage(chatMessageData);
         }
         
-        // Manejar mensajes eliminados
         if (messageData.event === "App\\Events\\MessageDeletedEvent") {
           const deleteData = JSON.parse(messageData.data);
           removeMessage(deleteData.message.id);
         }
         
-        // Manejar usuarios baneados
         if (messageData.event === "App\\Events\\UserBannedEvent") {
           const banData = JSON.parse(messageData.data);
           removeUserMessages(banData.user.id);
         }
-      } catch (err) {
-        // Ignorar errores de parsing
-      }
+      } catch (err) {}
     });
     
     kickWS.addEventListener("error", () => {
@@ -889,13 +881,11 @@
       setTimeout(connectWebSocket, 1000);
     });
   }
-  
-  // Manejar mensaje de chat recibido por WebSocket
+
   function handleChatMessage(data) {
     if (messageIds.has(data.id)) return;
     messageIds.add(data.id);
     
-    // Crear objeto de mensaje compatible con el formato anterior
     const message = {
       id: data.id,
       content: data.content,
@@ -912,22 +902,16 @@
     
     addMessage(message);
   }
-  
-  // Eliminar mensaje específico
+
   function removeMessage(messageId) {
     const msgElement = document.getElementById(messageId);
-    if (msgElement) {
-      msgElement.remove();
-    }
+    if (msgElement) msgElement.remove();
   }
-  
-  // Eliminar todos los mensajes de un usuario
+
   function removeUserMessages(userId) {
-    const messages = document.querySelectorAll(`[data-user-id="${userId}"]`);
-    messages.forEach(msg => msg.remove());
+    document.querySelectorAll(`[data-user-id="${userId}"]`).forEach(msg => msg.remove());
   }
-  
-  // Obtener mensajes iniciales
+
   async function fetchInitialMessages() {
     if (!CHAT_URL) return;
     
@@ -943,12 +927,9 @@
           }
         });
       }
-    } catch (err) {
-      // Silenciar errores
-    }
+    } catch (err) {}
   }
 
-  // Copiar link al portapapeles
   copyLinkBtn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(generatedLink.value);
@@ -971,7 +952,6 @@
     if (e.key === "Enter") loadChat();
   });
 
-  // Auto-cargar si hay parámetro de canal en la URL
   window.addEventListener("DOMContentLoaded", () => {
     const channelParam = getUrlParams();
     if (channelParam) {
