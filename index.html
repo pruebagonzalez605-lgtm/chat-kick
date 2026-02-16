@@ -275,11 +275,35 @@
     "founder": "assets/founder.png"
   };
 
-  // Sets comunitarios populares de 7TV para Kick (actualizados 2026)
-  const KICK_7TV_COMMUNITY_SETS = [
-    "01HTTD778R000E3Y75DEQDXPKB",   // Variante Kick con canal carlogato
-    // Puedes agregar más IDs buscando "Kick" en https://7tv.app/emote-sets
-  ];
+// Sets comunitarios de 7TV más relevantes para Kick (ordenados por prioridad 2026)
+// Prioridad: 
+// 1. Sets "global-like" o más usados en chats Kick (emotes como catKISS, catJAM, BOOBA, GIGACHAD, modCheck...)
+// 2. Sets de streamers top / influencers grandes
+// 3. Sets comunitarios virales / genéricos Kick
+// 4. Sets personalizados / nicho (incluyendo tu ejemplo de carlogato)
+const KICK_7TV_COMMUNITY_SETS = [
+
+  // ────────────────────────────────────────────────
+  // Nivel 1 - Más "globales" en Kick (emotes casi universales en la plataforma)
+  // ────────────────────────────────────────────────
+  "01JX23KZ009X2NQRFMKZWMEMYV",   // Kick Emotes (muy grande: 389+ emotes, incluye catKISS, catJAM, BOOBA, GIGACHAD, modCheck, Sadge, COPIUM, peepoLeave, etc.)
+  "64bd1aeefb581ca4e4d1c5a4",   // Stank's Kick Emotes (Stuxy) - incluye stinky, catKISS, GIGACHAD...
+
+  // ────────────────────────────────────────────────
+  // Nivel 2 - Streamers top y sets históricos/referenciados en Kick
+  // ────────────────────────────────────────────────
+  "64bd1aeefb581ca4e4d1c5a4",   // Kick Emotes (grande y con catKISS)
+  "01HTTD778R000E3Y75DEQDXPKB",   // Kick Emotes carlogato
+
+  // ────────────────────────────────────────────────
+  // Nivel 3 - Personalizados / nicho (tu ejemplo incluido)
+  // ────────────────────────────────────────────────
+  "01HTTD778R000E3Y75DEQDXPKB", // Variante Kick con canal carlogato (tu set personalizado)
+
+  // Opcionales extras (puedes descomentar o agregar si quieres más cobertura sin sobrecargar):
+  // "64837a394ac4a2c05d8be978",   // NEW KICK SET (variante reciente con emotes nuevos)
+  // "01H2ER2QB800091XGSV6QPJ35R", // Otro Kick Emotes con docJAM, catJAM, etc.
+];
 
   // ============ FETCH HELPERS ============
   function getUrlParams() {
@@ -516,25 +540,28 @@
   }
 
   // ============ NUEVO: LOAD 7TV COMMUNITY SETS PARA KICK ============
-  async function load7TVCommunitySets() {
-    statusMsg.textContent = "Cargando sets comunitarios de 7TV para Kick...";
-    let totalLoaded = 0;
+async function load7TVCommunitySets() {
+  statusMsg.textContent = "Cargando sets comunitarios de 7TV para Kick (priorizados)...";
+  let totalLoaded = 0;
+  let loadedSets = 0;
 
-    for (const setId of KICK_7TV_COMMUNITY_SETS) {
-      try {
-        const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
-        if (!data?.emotes?.length) continue;
+  for (const setId of KICK_7TV_COMMUNITY_SETS) {
+    try {
+      const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
+      if (!data?.emotes?.length) continue;
 
-        let setLoaded = 0;
-        data.emotes.forEach(emote => {
-          const host = emote.data.host;
-          const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-          if (!file) return;
+      let setLoaded = 0;
+      data.emotes.forEach(emote => {
+        const host = emote.data.host;
+        const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
+        if (!file) return;
 
-          const code = emote.name;
-          // Prioridad: no sobreescribir si ya existe en channel o global
-          if (emotesData.seventv.channel[code] || emotesData.seventv.global[code]) return;
+        const code = emote.name;
+        // Prioridad ya está en el array → no sobreescribimos si existe algo más prioritario antes
+        if (emotesData.seventv.channel[code] || emotesData.seventv.global[code]) return;
 
+        // Solo agregamos si NO está ya en community (evitar duplicados)
+        if (!emotesData.seventv.community[code]) {
           emotesData.seventv.community[code] = {
             id: emote.id,
             url: `https:${host.url}/${file.name}`,
@@ -545,20 +572,23 @@
           };
           setLoaded++;
           totalLoaded++;
-        });
+        }
+      });
 
-        console.log(`Set 7TV ${setId} → ${setLoaded} emotes nuevos`);
-      } catch (err) {
-        console.warn(`Error cargando set 7TV ${setId}:`, err);
-      }
-    }
-
-    console.log(`Total emotes 7TV comunitarios cargados: ${totalLoaded}`);
-    if (totalLoaded > 0) {
-      statusMsg.textContent += ` (${totalLoaded} emotes 7TV Kick cargados)`;
+      loadedSets++;
+      console.log(`Set 7TV ${setId} → ${setLoaded} emotes nuevos`);
+    } catch (err) {
+      console.warn(`Error cargando set 7TV ${setId}:`, err);
     }
   }
 
+  console.log(`Total emotes 7TV comunitarios cargados: ${totalLoaded} de ${loadedSets} sets`);
+  if (totalLoaded > 0) {
+    statusMsg.textContent = `Sets 7TV Kick cargados (${totalLoaded} emotes de ${loadedSets} sets)`;
+  } else {
+    statusMsg.textContent = "No se pudieron cargar sets comunitarios 7TV";
+  }
+}
   // ============ LOAD CHATTERINO BADGES ============
   async function loadChatterinoBadges() {
     try {
@@ -633,38 +663,47 @@
   }
 
   // ============ PROCESS EMOTES (prioridad: channel > community > global) ============
-  function processEmotes(text, zeroWidthEmotes = []) {
-    if (!text) return "";
-    
-    let result = text.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
-      return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${nombre}" title="${nombre}" class="emote">`;
+function processEmotes(text, zeroWidthEmotes = []) {
+  if (!text) return "";
+
+  // PRIMERO: emotes de terceros (7TV/BTTV/FFZ) - con protección anti-conflicto
+  let result = text;
+
+  const allEmotes = {
+    ...emotesData.seventv.channel,
+    ...emotesData.seventv.community,
+    ...emotesData.seventv.global,
+    ...emotesData.bttv.channel,
+    ...emotesData.bttv.shared,
+    ...emotesData.bttv.global,
+    ...emotesData.ffz.channel,
+    ...emotesData.ffz.global
+  };
+
+  const sortedEmotes = Object.entries(allEmotes).sort((a, b) => b[0].length - a[0].length);
+
+  sortedEmotes.forEach(([code, emote]) => {
+    const escaped = escapeRegex(code);
+    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)${escaped}(?!\\w)(?![^<]*>)`, 'gi');
+    result = result.replace(regex, (match) => {
+      const isZero = emote.zero_width ? ' emote-zero-width' : '';
+      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
     });
+  });
 
-    const allEmotes = {
-      ...emotesData.seventv.channel,      // 1. Canal (si llega a cargar)
-      ...emotesData.seventv.community,    // 2. Sets comunitarios Kick (lo principal)
-      ...emotesData.seventv.global,       // 3. Globales 7TV
-      ...emotesData.bttv.channel,
-      ...emotesData.bttv.shared,
-      ...emotesData.bttv.global,
-      ...emotesData.ffz.channel,
-      ...emotesData.ffz.global
-    };
+  // DESPUÉS: emotes NATIVOS de Kick (menos riesgo ahora)
+  result = result.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
+    // Limpiamos el nombre para evitar basura en alt
+    const cleanNombre = (nombre || 'emote').replace(/[<>"']/g, '');
+    return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${cleanNombre}" title="${cleanNombre}" class="emote">`;
+  });
 
-    const sortedEmotes = Object.entries(allEmotes).sort((a, b) => b[0].length - a[0].length);
+  // Limpieza extra de residuos típicos (como los que ves)
+  result = result.replace(/alt="[^"]*title="([^"]*)"[^"]*class="emote"/g, 'alt="$1" title="$1" class="emote"');
+  result = result.replace(/"title=""|'class="emote">/g, '');
 
-    sortedEmotes.forEach(([code, emote]) => {
-      const regex = new RegExp(`\\b${escapeRegex(code)}\\b`, 'g');
-      const isZeroWidth = emote.zero_width;
-      
-      result = result.replace(regex, (match) => {
-        return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZeroWidth ? ' emote-zero-width' : ''}">`;
-      });
-    });
-
-    return result;
-  }
-
+  return result;
+}
   function escapeRegex(string) {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
