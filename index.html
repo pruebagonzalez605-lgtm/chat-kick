@@ -642,13 +642,15 @@ async function load7TVCommunitySets() {
 
   // ============ LOAD ALL THIRD PARTY DATA ============
   async function loadAllThirdPartyData(twitchId = null) {
-    statusMsg.textContent = "Cargando emotes y badges de terceros (incluyendo 7TV Kick)...";
+    statusMsg.textContent = "Cargando emotes y badges de terceros...";
     
+    // Cargar en orden: 7TV community sets primero (los que el usuario especifica)
+    // Luego el resto en paralelo
     await Promise.all([
+      load7TVCommunitySets(),  // 7TV con los sets que el usuario pone
       loadFFZData(twitchId),
       loadBTTVData(twitchId),
       load7TVData(twitchId),
-      load7TVCommunitySets(),
       loadChatterinoBadges(),
       loadFFZAPBadges()
     ]);
@@ -662,40 +664,64 @@ async function load7TVCommunitySets() {
     });
   }
 
-  // ============ PROCESS EMOTES (prioridad: channel > community > global) ============
+  // ============ PROCESS EMOTES (prioridad: Kick native > 7TV community > 7TV global > BTTV > FFZ) ============
 function processEmotes(text, zeroWidthEmotes = []) {
   if (!text) return "";
 
-  // PRIMERO: emotes de terceros (7TV/BTTV/FFZ) - con protección anti-conflicto
   let result = text;
 
-  const allEmotes = {
-    ...emotesData.seventv.channel,
-    ...emotesData.seventv.community,
-    ...emotesData.seventv.global,
-    ...emotesData.bttv.channel,
-    ...emotesData.bttv.shared,
-    ...emotesData.bttv.global,
-    ...emotesData.ffz.channel,
-    ...emotesData.ffz.global
-  };
+  // PRIMERO: Emotes NATIVOS de Kick (prioridad máxima)
+  result = result.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
+    const cleanNombre = (nombre || 'emote').replace(/[<>"']/g, '');
+    return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${cleanNombre}" title="${cleanNombre}" class="emote">`;
+  });
 
-  const sortedEmotes = Object.entries(allEmotes).sort((a, b) => b[0].length - a[0].length);
-
-  sortedEmotes.forEach(([code, emote]) => {
+  // SEGUNDO: 7TV Community Sets
+  const seventvCommunityEmotes = { ...emotesData.seventv.community };
+  const sorted7tvCommunity = Object.entries(seventvCommunityEmotes).sort((a, b) => b[0].length - a[0].length);
+  sorted7tvCommunity.forEach(([code, emote]) => {
     const escaped = escapeRegex(code);
-    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)${escaped}(?!\\w)(?![^<]*>)`, 'gi');
+    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
     result = result.replace(regex, (match) => {
       const isZero = emote.zero_width ? ' emote-zero-width' : '';
       return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
     });
   });
 
-  // DESPUÉS: emotes NATIVOS de Kick (menos riesgo ahora)
-  result = result.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
-    // Limpiamos el nombre para evitar basura en alt
-    const cleanNombre = (nombre || 'emote').replace(/[<>"']/g, '');
-    return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${cleanNombre}" title="${cleanNombre}" class="emote">`;
+  // TERCERO: 7TV Global y Channel
+  const seventvEmotes = { ...emotesData.seventv.channel, ...emotesData.seventv.global };
+  const sorted7tv = Object.entries(seventvEmotes).sort((a, b) => b[0].length - a[0].length);
+  sorted7tv.forEach(([code, emote]) => {
+    const escaped = escapeRegex(code);
+    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
+    result = result.replace(regex, (match) => {
+      const isZero = emote.zero_width ? ' emote-zero-width' : '';
+      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    });
+  });
+
+  // CUARTO: BTTV
+  const bttvEmotes = { ...emotesData.bttv.channel, ...emotesData.bttv.shared, ...emotesData.bttv.global };
+  const sortedBttv = Object.entries(bttvEmotes).sort((a, b) => b[0].length - a[0].length);
+  sortedBttv.forEach(([code, emote]) => {
+    const escaped = escapeRegex(code);
+    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
+    result = result.replace(regex, (match) => {
+      const isZero = emote.zero_width ? ' emote-zero-width' : '';
+      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    });
+  });
+
+  // QUINTO: FFZ
+  const ffzEmotes = { ...emotesData.ffz.channel, ...emotesData.ffz.global };
+  const sortedFfz = Object.entries(ffzEmotes).sort((a, b) => b[0].length - a[0].length);
+  sortedFfz.forEach(([code, emote]) => {
+    const escaped = escapeRegex(code);
+    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
+    result = result.replace(regex, (match) => {
+      const isZero = emote.zero_width ? ' emote-zero-width' : '';
+      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    });
   });
 
   // Limpieza extra de residuos típicos (como los que ves)
