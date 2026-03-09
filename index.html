@@ -42,18 +42,6 @@
       height: 100vh;
     }
 
-    .chat-header {
-      background: transparent;
-      border-bottom: none;
-      padding: 0.5rem 1rem;
-      text-align: left;
-      color: var(--accent);
-      font-weight: 700;
-      font-size: 0.9rem;
-      letter-spacing: 1px;
-      display: none;
-    }
-
     #channel-input-container {
       padding: 1rem;
       width: 100%;
@@ -74,18 +62,9 @@
     }
 
     #chat::-webkit-scrollbar { width: 0px; }
-    #chat::-webkit-scrollbar-track {
-      background: transparent;
-      border-radius: 6px;
-    }
-    #chat::-webkit-scrollbar-thumb {
-      background: transparent;
-      border-radius: 6px;
-      box-shadow: none;
-    }
 
     .msg {
-      margin-bottom: 0.3rem;
+      margin-bottom: 0.3rem; /* ← Aumentado para que los mensajes no queden tan pegados verticalmente */
       padding: 0;
       border-radius: 0;
       background: transparent;
@@ -100,24 +79,12 @@
       word-wrap: break-word;
     }
 
-    .msg:hover {
-      background: transparent;
-      transform: translateY(0);
-      box-shadow: none;
-    }
-
     .meta {
-      display: inline;
-      align-items: center;
-      gap: 0;
-      margin-bottom: 0;
-      flex-wrap: nowrap;
-    }
-
-    .badges {
-      display: flex;
+      display: inline-flex;
       align-items: center;
       gap: 4px;
+      margin-bottom: 0;
+      flex-wrap: nowrap;
     }
 
     .badge-icon {
@@ -131,11 +98,6 @@
       display: inline-block;
     }
 
-    .time { 
-      color: var(--muted); 
-      font-size: 0.8em;
-      display: none;
-    }
     .user {
       font-weight: 800;
       font-size: 1em;
@@ -155,12 +117,24 @@
       font-size: 1em;
       background: transparent;
       display: inline;
-      margin-left: 0;
+      margin-left: 5px; /* ← ESPACIADO NUEVO: aquí separo el nombre del mensaje para que no quede pegado */
     }
 
+    /* ===================== EMOTES ===================== */
     .emote {
       width: 32px;
       height: 32px;
+      vertical-align: middle;
+      margin: 0 3px;
+      border-radius: 6px;
+      max-width: 75px;
+      max-height: 32px;
+      margin-right: -3px;
+    }
+
+    .emote-third {
+      height: 32px;
+      width: auto;
       vertical-align: middle;
       margin: 0 3px;
       border-radius: 6px;
@@ -178,19 +152,11 @@
       from { opacity: 0; transform: translateY(10px); }
       to { opacity: 1; transform: translateY(0); }
     }
-
-    /* Name paints - gradient text support */
-    .name-paint {
-      background-clip: text;
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
   </style>
 </head>
 <body>
 
   <section id="chat-section">
-    <div class="chat-header">💬 Chat en tiempo real</div>
     <div id="channel-input-container">
       <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
         <input type="text" id="channel-name-input" placeholder="Nombre del canal (ej: xqc)" 
@@ -224,7 +190,7 @@
   // Proxy CORS
   const CORS_PROXY = "https://corsproxy.io/?";
   
-  // WebSocket de Pusher para tiempo real
+  // WebSocket de Pusher
   const PUSHER_WS_URL = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=7.6.0&flash=false";
   
   let CHANNEL_ID = null;
@@ -242,15 +208,12 @@
   const copyLinkBtn = document.getElementById("copy-link-btn");
   const openLinkBtn = document.getElementById("open-link-btn");
   let messageIds = new Set();
-  let pollInterval = null;
-  let isFetching = false;
-  let abortController = null;
 
-  // ============ EMOTES & BADGES STORAGE ============
+  // ============ STORAGE ============
   let emotesData = {
     ffz: { global: {}, channel: {} },
     bttv: { global: {}, channel: {}, shared: {} },
-    seventv: { global: {}, channel: {}, community: {} }  // ← Nuevo: para sets comunitarios Kick
+    seventv: { global: {}, channel: {}, community: {} }
   };
 
   let badgesData = {
@@ -263,7 +226,8 @@
 
   let namePaints = {};
 
-  // Kick badges locales
+  let seventvUserCache = {};
+
   const KICK_BADGES = {
     "moderator": "assets/mod.svg",
     "vip": "assets/vip.svg",
@@ -275,35 +239,11 @@
     "founder": "assets/founder.png"
   };
 
-// Sets comunitarios de 7TV más relevantes para Kick (ordenados por prioridad 2026)
-// Prioridad: 
-// 1. Sets "global-like" o más usados en chats Kick (emotes como catKISS, catJAM, BOOBA, GIGACHAD, modCheck...)
-// 2. Sets de streamers top / influencers grandes
-// 3. Sets comunitarios virales / genéricos Kick
-// 4. Sets personalizados / nicho (incluyendo tu ejemplo de carlogato)
-const KICK_7TV_COMMUNITY_SETS = [
-
-  // ────────────────────────────────────────────────
-  // Nivel 1 - Más "globales" en Kick (emotes casi universales en la plataforma)
-  // ────────────────────────────────────────────────
-  "01HTTD778R000E3Y75DEQDXPKB",   // Kick Emotes (muy grande: 389+ emotes, incluye catKISS, catJAM, BOOBA, GIGACHAD, modCheck, Sadge, COPIUM, peepoLeave, etc.)
-  "",   // Stank's Kick Emotes (Stuxy) - incluye stinky, catKISS, GIGACHAD...
-
-  // ────────────────────────────────────────────────
-  // Nivel 2 - Streamers top y sets históricos/referenciados en Kick
-  // ────────────────────────────────────────────────
-  "",   // Kick Emotes (grande y con catKISS)
-  "01HTTD778R000E3Y75DEQDXPKB",   // Kick Emotes carlogato
-
-  // ────────────────────────────────────────────────
-  // Nivel 3 - Personalizados / nicho (tu ejemplo incluido)
-  // ────────────────────────────────────────────────
-  "01HTTD778R000E3Y75DEQDXPKB", // Variante Kick con canal carlogato (tu set personalizado)
-
-  // Opcionales extras (puedes descomentar o agregar si quieres más cobertura sin sobrecargar):
-  // "64837a394ac4a2c05d8be978",   // NEW KICK SET (variante reciente con emotes nuevos)
-  // "01H2ER2QB800091XGSV6QPJ35R", // Otro Kick Emotes con docJAM, catJAM, etc.
-];
+  const STREAMER_CUSTOM_7TV_SETS = {
+    "carlogato": ["01HTTD778R000E3Y75DEQDXPKB"],
+    "elshark": ["01GSHNB3R8000CWYGY299P02K7"],
+    "elviejoesteban": ["01JPCFHR3A28YZR5VA53J8W2MJ"],
+  };
 
   // ============ FETCH HELPERS ============
   function getUrlParams() {
@@ -319,15 +259,8 @@ const KICK_7TV_COMMUNITY_SETS = [
   async function fetchDirect(url, timeout = 5000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
-    
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        signal: controller.signal,
-        cache: 'no-store',
-        mode: 'cors'
-      });
+      const res = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }, signal: controller.signal, cache: 'no-store' });
       clearTimeout(timeoutId);
       return await res.json();
     } catch (err) {
@@ -339,13 +272,9 @@ const KICK_7TV_COMMUNITY_SETS = [
   async function fetchWithProxy(url, timeout = 5000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
-    
     try {
       const proxyUrl = CORS_PROXY + encodeURIComponent(url);
-      const res = await fetch(proxyUrl, {
-        signal: controller.signal,
-        cache: 'no-store'
-      });
+      const res = await fetch(proxyUrl, { signal: controller.signal, cache: 'no-store' });
       clearTimeout(timeoutId);
       return await res.json();
     } catch (err) {
@@ -355,19 +284,35 @@ const KICK_7TV_COMMUNITY_SETS = [
   }
 
   async function raceFetch(url) {
-    return Promise.race([
-      fetchDirect(url).catch(() => null),
-      fetchWithProxy(url).catch(() => null)
-    ]).then(result => {
-      if (result) return result;
-      return fetchWithProxy(url);
-    });
+    return Promise.race([fetchDirect(url).catch(() => null), fetchWithProxy(url).catch(() => null)]).then(r => r || fetchWithProxy(url));
   }
 
   const smartFetch = raceFetch;
 
-  // ============ LOAD FFZ EMOTES & BADGES ============
-  async function loadFFZData(twitchId = null) {
+  // ============ FETCH 7TV USER COSMETICS ============
+  async function fetch7TVUserCosmetics(kickUserId) {
+    if (!kickUserId || seventvUserCache[kickUserId] !== undefined) return seventvUserCache[kickUserId];
+    try {
+      const data = await smartFetch(`https://7tv.io/v3/users/kick/${kickUserId}`);
+      if (!data?.user) {
+        seventvUserCache[kickUserId] = null;
+        return null;
+      }
+      const u = data.user;
+      const cosmetics = {
+        paint: u.style?.paints?.[0] || null,
+        badges: u.style?.badges || []
+      };
+      seventvUserCache[kickUserId] = cosmetics;
+      return cosmetics;
+    } catch (e) {
+      seventvUserCache[kickUserId] = null;
+      return null;
+    }
+  }
+
+  // ============ LOAD EMOTES & BADGES ============
+  async function loadFFZData() {
     try {
       const globalData = await raceFetch("https://api.frankerfacez.com/v1/set/global");
       if (globalData.sets) {
@@ -377,59 +322,15 @@ const KICK_7TV_COMMUNITY_SETS = [
               id: emote.id,
               url: `https://cdn.frankerfacez.com/emote/${emote.id}/2`,
               url2x: `https://cdn.frankerfacez.com/emote/${emote.id}/4`,
-              width: emote.width,
-              height: emote.height,
               zero_width: emote.css?.includes('transform') || false
             };
           });
         });
       }
-
-      if (twitchId) {
-        try {
-          const roomData = await smartFetch(`https://api.frankerfacez.com/v1/room/id/${twitchId}`);
-          if (roomData.sets) {
-            Object.values(roomData.sets).forEach(set => {
-              set.emoticons.forEach(emote => {
-                emotesData.ffz.channel[emote.name] = {
-                  id: emote.id,
-                  url: `https://cdn.frankerfacez.com/emote/${emote.id}/2`,
-                  url2x: `https://cdn.frankerfacez.com/emote/${emote.id}/4`,
-                  width: emote.width,
-                  height: emote.height,
-                  zero_width: emote.css?.includes('transform') || false
-                };
-              });
-            });
-          }
-        } catch (e) {}
-      }
-
-      const badgesDataFfz = await smartFetch("https://api.frankerfacez.com/v1/badges");
-      if (badgesDataFfz.badges) {
-        badgesDataFfz.badges.forEach(badge => {
-          badgesData.ffz[badge.id] = {
-            name: badge.name,
-            url: `https://cdn.frankerfacez.com/badge/${badge.id}/2`,
-            color: badge.color
-          };
-        });
-        if (badgesDataFfz.users) {
-          Object.entries(badgesDataFfz.users).forEach(([badgeId, users]) => {
-            users.forEach(username => {
-              if (!badgesData.ffz[username]) badgesData.ffz[username] = [];
-              badgesData.ffz[username].push(badgeId);
-            });
-          });
-        }
-      }
-    } catch (e) {
-      console.warn("FFZ data load error:", e);
-    }
+    } catch (e) {}
   }
 
-  // ============ LOAD BTTV EMOTES & BADGES ============
-  async function loadBTTVData(twitchId = null) {
+  async function loadBTTVData() {
     try {
       const globalData = await smartFetch("https://api.betterttv.net/3/cached/emotes/global");
       globalData.forEach(emote => {
@@ -440,48 +341,10 @@ const KICK_7TV_COMMUNITY_SETS = [
           zero_width: emote.modifier || false
         };
       });
-
-      if (twitchId) {
-        try {
-          const channelData = await smartFetch(`https://api.betterttv.net/3/cached/users/twitch/${twitchId}`);
-          if (channelData.channelEmotes) {
-            channelData.channelEmotes.forEach(emote => {
-              emotesData.bttv.channel[emote.code] = {
-                id: emote.id,
-                url: `https://cdn.betterttv.net/emote/${emote.id}/2x`,
-                url2x: `https://cdn.betterttv.net/emote/${emote.id}/3x`,
-                zero_width: false
-              };
-            });
-          }
-          if (channelData.sharedEmotes) {
-            channelData.sharedEmotes.forEach(emote => {
-              emotesData.bttv.shared[emote.code] = {
-                id: emote.id,
-                url: `https://cdn.betterttv.net/emote/${emote.id}/2x`,
-                url2x: `https://cdn.betterttv.net/emote/${emote.id}/3x`,
-                zero_width: false
-              };
-            });
-          }
-        } catch (e) {}
-      }
-
-      const badgesDataBttv = await smartFetch("https://api.betterttv.net/3/cached/badges");
-      badgesDataBttv.forEach(badge => {
-        badgesData.bttv[badge.id] = {
-          name: badge.name,
-          url: `https://cdn.betterttv.net/badge/${badge.id}/2x`,
-          provider: badge.provider
-        };
-      });
-    } catch (e) {
-      console.warn("BTTV data load error:", e);
-    }
+    } catch (e) {}
   }
 
-  // ============ LOAD 7TV GLOBAL + CHANNEL ============
-  async function load7TVData(twitchId = null) {
+  async function load7TVData() {
     try {
       const globalData = await smartFetch("https://7tv.io/v3/emote-sets/global");
       if (globalData.emotes) {
@@ -495,349 +358,197 @@ const KICK_7TV_COMMUNITY_SETS = [
             id: emote.id,
             url: `https:${host.url}/${file.name}`,
             url2x: `https:${host.url}/${host.files[1]?.name || file.name}`,
-            width: emote.data.width?.[0] || 32,
-            height: emote.data.height?.[0] || 32,
             zero_width: emote.data.flags === 1 || emote.data.flags === 3
           };
         });
       }
-
-      if (twitchId) {
-        try {
-          const userData = await smartFetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
-          if (userData.emote_set?.emotes) {
-            userData.emote_set.emotes.forEach(emote => {
-              const host = emote.data.host;
-              const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-              if (!file) return;
-              const code = emote.name;
-              emotesData.seventv.channel[code] = {
-                id: emote.id,
-                url: `https:${host.url}/${file.name}`,
-                url2x: `https:${host.url}/${host.files[1]?.name || file.name}`,
-                width: emote.data.width?.[0] || 32,
-                height: emote.data.height?.[0] || 32,
-                zero_width: emote.data.flags === 1 || emote.data.flags === 3
-              };
-            });
-          }
-
-          if (userData.user?.style?.paints) {
-            userData.user.style.paints.forEach(paint => {
-              namePaints[userData.user.id] = {
-                name: paint.name,
-                color: paint.color,
-                gradient: paint.gradient,
-                shadows: paint.shadows
-              };
-            });
-          }
-        } catch (e) {}
-      }
-    } catch (e) {
-      console.warn("7TV global/channel load error:", e);
-    }
+    } catch (e) {}
   }
 
-  // ============ NUEVO: LOAD 7TV COMMUNITY SETS PARA KICK ============
-async function load7TVCommunitySets() {
-  statusMsg.textContent = "Cargando sets comunitarios de 7TV para Kick (priorizados)...";
-  let totalLoaded = 0;
-  let loadedSets = 0;
+  async function loadChannelCustom7TVSets(channelSlug) {
+    emotesData.seventv.community = {};
+    const setIds = STREAMER_CUSTOM_7TV_SETS[channelSlug?.toLowerCase()] || [];
+    if (setIds.length === 0) return;
 
-  for (const setId of KICK_7TV_COMMUNITY_SETS) {
-    try {
-      const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
-      if (!data?.emotes?.length) continue;
+    statusMsg.textContent = `Cargando packs 7TV de ${channelSlug}...`;
+    let totalLoaded = 0;
 
-      let setLoaded = 0;
-      data.emotes.forEach(emote => {
-        const host = emote.data.host;
-        const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-        if (!file) return;
+    for (const setId of setIds) {
+      try {
+        const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
+        if (!data?.emotes?.length) continue;
 
-        const code = emote.name;
-        // Prioridad ya está en el array → no sobreescribimos si existe algo más prioritario antes
-        if (emotesData.seventv.channel[code] || emotesData.seventv.global[code]) return;
+        data.emotes.forEach(emote => {
+          const host = emote.data.host;
+          const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
+          if (!file) return;
+          const code = emote.name;
+          if (emotesData.seventv.global[code] || emotesData.seventv.channel[code]) return;
 
-        // Solo agregamos si NO está ya en community (evitar duplicados)
-        if (!emotesData.seventv.community[code]) {
           emotesData.seventv.community[code] = {
             id: emote.id,
             url: `https:${host.url}/${file.name}`,
             url2x: `https:${host.url}/${host.files[1]?.name || file.name}`,
-            width: emote.data.width?.[0] || 32,
-            height: emote.data.height?.[0] || 32,
             zero_width: emote.data.flags === 1 || emote.data.flags === 3
           };
-          setLoaded++;
           totalLoaded++;
-        }
-      });
-
-      loadedSets++;
-      console.log(`Set 7TV ${setId} → ${setLoaded} emotes nuevos`);
-    } catch (err) {
-      console.warn(`Error cargando set 7TV ${setId}:`, err);
+        });
+      } catch (err) {}
     }
+    if (totalLoaded > 0) statusMsg.textContent = `✅ ${totalLoaded} emotes 7TV de ${channelSlug} cargados`;
   }
 
-  console.log(`Total emotes 7TV comunitarios cargados: ${totalLoaded} de ${loadedSets} sets`);
-  if (totalLoaded > 0) {
-    statusMsg.textContent = `Sets 7TV Kick cargados (${totalLoaded} emotes de ${loadedSets} sets)`;
-  } else {
-    statusMsg.textContent = "No se pudieron cargar sets comunitarios 7TV";
-  }
-}
-  // ============ LOAD CHATTERINO BADGES ============
   async function loadChatterinoBadges() {
     try {
       const data = await smartFetch("https://api.chatterino.com/badges");
       if (data.badges) {
         data.badges.forEach(badge => {
-          badgesData.chatterino[badge.id] = {
-            name: badge.tooltip,
-            url: badge.image1,
-            url2x: badge.image2,
-            users: badge.users || []
-          };
-          badge.users?.forEach(username => {
-            const key = username.toLowerCase();
-            if (!badgesData.chatterino[key]) badgesData.chatterino[key] = [];
-            badgesData.chatterino[key].push(badge.id);
-          });
+          badgesData.chatterino[badge.id] = { name: badge.tooltip, url: badge.image1, url2x: badge.image2 };
         });
       }
-    } catch (e) {
-      console.warn("Chatterino badges load error:", e);
-    }
+    } catch (e) {}
   }
 
-  // ============ LOAD FFZ:AP BADGES ============
   async function loadFFZAPBadges() {
     try {
       const data = await smartFetch("https://api-test.frankerfacez.com/badges");
       if (data.badges) {
         data.badges.forEach(badge => {
-          badgesData.ffzap[badge.id] = {
-            name: badge.name,
-            url: badge.urls?.['2'] || badge.urls?.['1'],
-            color: badge.color
-          };
+          badgesData.ffzap[badge.id] = { name: badge.name, url: badge.urls?.['2'] || badge.urls?.['1'] };
         });
-        if (data.users) {
-          Object.entries(data.users).forEach(([badgeId, users]) => {
-            users.forEach(username => {
-              const key = username.toLowerCase();
-              if (!badgesData.ffzap[key]) badgesData.ffzap[key] = [];
-              badgesData.ffzap[key].push(parseInt(badgeId));
-            });
-          });
-        }
       }
-    } catch (e) {
-      console.warn("FFZ:AP badges load error:", e);
-    }
+    } catch (e) {}
   }
 
-  // ============ LOAD ALL THIRD PARTY DATA ============
-  async function loadAllThirdPartyData(twitchId = null) {
-    statusMsg.textContent = "Cargando emotes y badges de terceros...";
-    
-    // Cargar en orden: 7TV community sets primero (los que el usuario especifica)
-    // Luego el resto en paralelo
+  async function loadAllThirdPartyData(channelSlug = null) {
+    statusMsg.textContent = "Cargando emotes y badges...";
     await Promise.all([
-      load7TVCommunitySets(),  // 7TV con los sets que el usuario pone
-      loadFFZData(twitchId),
-      loadBTTVData(twitchId),
-      load7TVData(twitchId),
+      loadChannelCustom7TVSets(channelSlug),
+      loadFFZData(),
+      loadBTTVData(),
+      load7TVData(),
       loadChatterinoBadges(),
       loadFFZAPBadges()
     ]);
-    
-    console.log("Emotes cargados total:", {
-      ffz: Object.keys(emotesData.ffz.global).length + Object.keys(emotesData.ffz.channel).length,
-      bttv: Object.keys(emotesData.bttv.global).length + Object.keys(emotesData.bttv.channel).length + Object.keys(emotesData.bttv.shared).length,
-      seventv: Object.keys(emotesData.seventv.global).length + 
-               Object.keys(emotesData.seventv.channel).length + 
-               Object.keys(emotesData.seventv.community).length
-    });
   }
 
-  // ============ PROCESS EMOTES (prioridad: Kick native > 7TV community > 7TV global > BTTV > FFZ) ============
-function processEmotes(text, zeroWidthEmotes = []) {
-  if (!text) return "";
+  // ============ PROCESS EMOTES ============
+  function processEmotes(text) {
+    if (!text) return "";
+    let result = text;
 
-  let result = text;
-
-  // PRIMERO: Emotes NATIVOS de Kick (prioridad máxima)
-  result = result.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
-    const cleanNombre = (nombre || 'emote').replace(/[<>"']/g, '');
-    return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${cleanNombre}" title="${cleanNombre}" class="emote">`;
-  });
-
-  // SEGUNDO: 7TV Community Sets
-  const seventvCommunityEmotes = { ...emotesData.seventv.community };
-  const sorted7tvCommunity = Object.entries(seventvCommunityEmotes).sort((a, b) => b[0].length - a[0].length);
-  sorted7tvCommunity.forEach(([code, emote]) => {
-    const escaped = escapeRegex(code);
-    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
-    result = result.replace(regex, (match) => {
-      const isZero = emote.zero_width ? ' emote-zero-width' : '';
-      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    result = result.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id, nombre) => {
+      const clean = (nombre || 'emote').replace(/[<>"']/g, '');
+      return `<img src="https://files.kick.com/emotes/${id}/fullsize" alt="${clean}" title="${clean}" class="emote">`;
     });
-  });
 
-  // TERCERO: 7TV Global y Channel
-  const seventvEmotes = { ...emotesData.seventv.channel, ...emotesData.seventv.global };
-  const sorted7tv = Object.entries(seventvEmotes).sort((a, b) => b[0].length - a[0].length);
-  sorted7tv.forEach(([code, emote]) => {
-    const escaped = escapeRegex(code);
-    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
-    result = result.replace(regex, (match) => {
-      const isZero = emote.zero_width ? ' emote-zero-width' : '';
-      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    const sortedCommunity = Object.entries(emotesData.seventv.community).sort((a,b) => b[0].length - a[0].length);
+    sortedCommunity.forEach(([code, emote]) => {
+      const escaped = escapeRegex(code);
+      const regex = new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g');
+      result = result.replace(regex, `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote-third${emote.zero_width ? ' emote-zero-width' : ''}">`);
     });
-  });
 
-  // CUARTO: BTTV
-  const bttvEmotes = { ...emotesData.bttv.channel, ...emotesData.bttv.shared, ...emotesData.bttv.global };
-  const sortedBttv = Object.entries(bttvEmotes).sort((a, b) => b[0].length - a[0].length);
-  sortedBttv.forEach(([code, emote]) => {
-    const escaped = escapeRegex(code);
-    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
-    result = result.replace(regex, (match) => {
-      const isZero = emote.zero_width ? ' emote-zero-width' : '';
-      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    const sorted7tv = Object.entries(emotesData.seventv.global).sort((a,b) => b[0].length - a[0].length);
+    sorted7tv.forEach(([code, emote]) => {
+      const escaped = escapeRegex(code);
+      const regex = new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g');
+      result = result.replace(regex, `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote-third${emote.zero_width ? ' emote-zero-width' : ''}">`);
     });
-  });
 
-  // QUINTO: FFZ
-  const ffzEmotes = { ...emotesData.ffz.channel, ...emotesData.ffz.global };
-  const sortedFfz = Object.entries(ffzEmotes).sort((a, b) => b[0].length - a[0].length);
-  sortedFfz.forEach(([code, emote]) => {
-    const escaped = escapeRegex(code);
-    const regex = new RegExp(`(?<!<[^>]*>)(?<!alt="[^"]*)\\b${escaped}\\b(?![^<]*>)`, 'g');
-    result = result.replace(regex, (match) => {
-      const isZero = emote.zero_width ? ' emote-zero-width' : '';
-      return `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote${isZero}">`;
+    const sortedBttv = Object.entries(emotesData.bttv.global).sort((a,b) => b[0].length - a[0].length);
+    sortedBttv.forEach(([code, emote]) => {
+      const escaped = escapeRegex(code);
+      const regex = new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g');
+      result = result.replace(regex, `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote-third${emote.zero_width ? ' emote-zero-width' : ''}">`);
     });
-  });
 
-  // Limpieza extra de residuos típicos (como los que ves)
-  result = result.replace(/alt="[^"]*title="([^"]*)"[^"]*class="emote"/g, 'alt="$1" title="$1" class="emote"');
-  result = result.replace(/"title=""|'class="emote">/g, '');
+    const sortedFfz = Object.entries(emotesData.ffz.global).sort((a,b) => b[0].length - a[0].length);
+    sortedFfz.forEach(([code, emote]) => {
+      const escaped = escapeRegex(code);
+      const regex = new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g');
+      result = result.replace(regex, `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" alt="${code}" title="${code}" class="emote-third${emote.zero_width ? ' emote-zero-width' : ''}">`);
+    });
 
-  return result;
-}
+    return result;
+  }
+
   function escapeRegex(string) {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  // ============ GENERATE BADGES ============
-  function generateBadges(m) {
-    const badges = m.identity?.badges || m.sender?.identity?.badges || [];
-    const username = (m.sender?.username || "Anónimo").toLowerCase();
-    const userId = m.sender?.id;
-    
-    let badgeHtml = "";
+  // ============ GENERATE BADGES y NAME PAINT ============
+  function generateBadges(m, cosmetics) {
+    let html = "";
+    const kickBadges = m.identity?.badges || m.sender?.identity?.badges || [];
+    kickBadges.forEach(b => {
+      const tipo = b.type?.toLowerCase();
+      const icon = KICK_BADGES[tipo];
+      if (icon) html += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
+    });
 
-    if (Array.isArray(badges)) {
-      badges.forEach(b => {
-        const tipo = b.type?.toLowerCase();
-        const icon = KICK_BADGES[tipo];
-        if (icon) {
-          badgeHtml += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
-        }
+    if (cosmetics && cosmetics.badges && Array.isArray(cosmetics.badges)) {
+      cosmetics.badges.forEach(b => {
+        if (b.url) html += `<img src="${b.url}" alt="${b.tooltip || '7TV'}" title="${b.tooltip || '7TV Badge'}" class="badge-icon">`;
       });
     }
-
-    const seventvUserBadges = badgesData.seventv[`tw:${userId}`] || badgesData.seventv[username] || [];
-    seventvUserBadges.forEach(badgeId => {
-      const badge = badgesData.seventv[badgeId];
-      if (badge) {
-        badgeHtml += `<img src="${badge.url}" alt="${badge.name}" title="${badge.tooltip || badge.name}" class="badge-icon" style="border-radius: 4px;">`;
-      }
-    });
-
-    const ffzUserBadges = badgesData.ffz[username] || [];
-    ffzUserBadges.forEach(badgeId => {
-      const badge = badgesData.ffz[badgeId];
-      if (badge && typeof badge === 'object' && badge.url) {
-        badgeHtml += `<img src="${badge.url}" alt="${badge.name}" title="${badge.name}" class="badge-icon">`;
-      }
-    });
-
-    const chatterinoUserBadges = badgesData.chatterino[username] || [];
-    chatterinoUserBadges.forEach(badgeId => {
-      const badge = badgesData.chatterino[badgeId];
-      if (badge && typeof badge === 'object') {
-        badgeHtml += `<img src="${badge.url2x || badge.url}" alt="${badge.name}" title="${badge.name}" class="badge-icon">`;
-      }
-    });
-
-    const ffzapUserBadges = badgesData.ffzap[username] || [];
-    ffzapUserBadges.forEach(badgeId => {
-      const badge = badgesData.ffzap[badgeId];
-      if (badge && typeof badge === 'object' && badge.url) {
-        badgeHtml += `<img src="${badge.url}" alt="${badge.name}" title="${badge.name}" class="badge-icon">`;
-      }
-    });
-
-    return badgeHtml;
+    return html;
   }
 
-  // ============ GENERATE NAME PAINT ============
-  function generateNamePaint(m) {
-    const userId = m.sender?.id;
-    const username = m.sender?.username || "Anónimo";
+  function generateNamePaint(m, cosmetics) {
     const baseColor = m.identity?.color || m.sender?.identity?.color || "#00ff66";
-    
-    const paint = namePaints[userId];
-    
-    if (paint) {
+    if (cosmetics && cosmetics.paint) {
+      const p = cosmetics.paint;
       let style = "";
-      if (paint.gradient) {
-        const stops = paint.gradient.stops.map(s => `${s.color} ${s.at * 100}%`).join(', ');
-        style = `background: linear-gradient(${paint.gradient.angle}deg, ${stops}); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent;`;
-      } else if (paint.color) {
-        style = `color: ${paint.color};`;
+      if (p.gradient && p.gradient.stops) {
+        const stops = p.gradient.stops.map(s => `${s.color} ${s.at * 100}%`).join(', ');
+        style = `background: linear-gradient(${p.gradient.angle || 90}deg, ${stops}); -webkit-background-clip: text; -webkit-text-fill-color: transparent;`;
+      } else if (p.color) {
+        style = `color: ${p.color};`;
       }
-      
-      if (paint.shadows && paint.shadows.length > 0) {
-        const shadowStyle = paint.shadows.map(s => {
-          if (s.type === 'drop') {
-            return `drop-shadow(${s.x_offset}px ${s.y_offset}px ${s.radius}px ${s.color})`;
-          }
-          return '';
-        }).join(' ');
-        style += ` filter: ${shadowStyle};`;
+      if (p.shadows && p.shadows.length) {
+        const shadows = p.shadows.map(s => `drop-shadow(${s.x_offset || 0}px ${s.y_offset || 0}px ${s.radius || 0}px ${s.color})`).join(' ');
+        style += ` filter: ${shadows};`;
       }
-      
       return style || `color: ${baseColor};`;
     }
-    
     return `color: ${baseColor};`;
+  }
+
+  // ============ ADD MESSAGE ============
+  async function addMessage(m) {
+    if (messageIds.has(m.id)) return;
+    messageIds.add(m.id);
+
+    const username = m.sender?.username || "Anónimo";
+    const kickUserId = m.sender?.id || "";
+
+    const cosmetics = kickUserId ? await fetch7TVUserCosmetics(kickUserId) : null;
+
+    const badgesHTML = generateBadges(m, cosmetics);
+    const nameStyle = generateNamePaint(m, cosmetics);
+    const processedContent = processEmotes(m.content);
+
+    const msg = document.createElement("div");
+    msg.className = "msg";
+    msg.id = m.id || "";
+    msg.setAttribute("data-user-id", kickUserId);
+    msg.innerHTML = `<span class="meta"><span class="user" style="${nameStyle}">${badgesHTML}${username}</span></span><span class="text">${processedContent}</span>`;
+    
+    chatDiv.appendChild(msg);
+    chatDiv.scrollTop = chatDiv.scrollHeight;
   }
 
   // ============ MAIN FUNCTIONS ============
   async function getChannelId(channelSlug) {
     statusMsg.textContent = "Obteniendo información del canal...";
     statusMsg.style.color = "#53fc18";
-    
     try {
-      const apiUrl = `https://kick.com/api/v1/channels/${channelSlug}`;
-      const data = await smartFetch(apiUrl);
-      
-      const isLive = data.livestream && data.livestream.id;
-      const channelId = data.id;
-      const chatroomId = data.chatroom?.id;
-      
-      return { 
-        channelId: channelId,
-        chatroomId: chatroomId,
-        isLive: isLive,
-        channelData: data
+      const data = await smartFetch(`https://kick.com/api/v1/channels/${channelSlug}`);
+      return {
+        channelId: data.id,
+        chatroomId: data.chatroom?.id,
+        isLive: !!data.livestream?.id
       };
     } catch (err) {
       statusMsg.textContent = "Error: " + err.message;
@@ -848,196 +559,102 @@ function processEmotes(text, zeroWidthEmotes = []) {
 
   async function loadChat() {
     const channelName = channelInput.value.trim().toLowerCase();
-    
     if (!channelName) {
-      statusMsg.textContent = "Por favor, ingresa un nombre de canal";
+      statusMsg.textContent = "Por favor ingresa un nombre de canal";
       statusMsg.style.color = "#ff4444";
       return;
     }
-    
+
     try {
       const result = await getChannelId(channelName);
       CHANNEL_ID = result.channelId;
       CHATROOM_ID = result.chatroomId;
       currentChannel = channelName;
       CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
-      
-      await loadAllThirdPartyData();
-      
+
+      await loadAllThirdPartyData(currentChannel);
+
       const isChatOnlyMode = getUrlParams() !== null;
-      
       if (isChatOnlyMode) {
         inputContainer.style.display = "none";
         chatDiv.style.display = "flex";
       } else {
-        if (result.isLive) {
-          statusMsg.textContent = `🔴 EN VIVO: ${channelName} (WebSocket Real-Time)`;
-          statusMsg.style.color = "#53fc18";
-        } else {
-          statusMsg.textContent = `⚫ OFFLINE: ${channelName} - Esperando mensajes...`;
-          statusMsg.style.color = "#ffaa00";
-        }
-        
+        statusMsg.textContent = result.isLive ? `🔴 EN VIVO: ${channelName}` : `⚫ OFFLINE: ${channelName}`;
+        statusMsg.style.color = result.isLive ? "#53fc18" : "#ffaa00";
         const link = generateLink(channelName);
         generatedLink.value = link;
         linkContainer.style.display = "block";
-        
         channelInput.style.display = "none";
         loadBtn.style.display = "none";
         chatDiv.style.display = "flex";
       }
-      
+
       chatDiv.innerHTML = "";
       messageIds.clear();
-      
+
       connectWebSocket();
       fetchInitialMessages();
     } catch (err) {
-      console.error("Error:", err);
+      console.error(err);
     }
   }
 
   function connectWebSocket() {
-    if (kickWS) {
-      kickWS.close();
-    }
-    
+    if (kickWS) kickWS.close();
     kickWS = new WebSocket(PUSHER_WS_URL);
-    
+
     kickWS.addEventListener("open", () => {
-      console.log("WebSocket conectado a Pusher");
-      kickWS.send(JSON.stringify({
-        event: "pusher:subscribe",
-        data: { auth: "", channel: `chatrooms.${CHATROOM_ID}.v2` }
-      }));
+      kickWS.send(JSON.stringify({ event: "pusher:subscribe", data: { auth: "", channel: `chatrooms.${CHATROOM_ID}.v2` } }));
     });
-    
+
     kickWS.addEventListener("message", (event) => {
       try {
-        const messageData = JSON.parse(event.data);
-        
-        if (messageData.event === "App\\Events\\ChatMessageEvent") {
-          const chatMessageData = JSON.parse(messageData.data);
-          handleChatMessage(chatMessageData);
+        const msgData = JSON.parse(event.data);
+        if (msgData.event === "App\\Events\\ChatMessageEvent") {
+          const data = JSON.parse(msgData.data);
+          const message = { id: data.id, content: data.content, sender: data.sender, identity: data.sender.identity };
+          addMessage(message);
         }
-        
-        if (messageData.event === "App\\Events\\MessageDeletedEvent") {
-          const deleteData = JSON.parse(messageData.data);
-          removeMessage(deleteData.message.id);
-        }
-        
-        if (messageData.event === "App\\Events\\UserBannedEvent") {
-          const banData = JSON.parse(messageData.data);
-          removeUserMessages(banData.user.id);
-        }
-      } catch (err) {}
+      } catch (e) {}
     });
-    
-    kickWS.addEventListener("error", () => {
-      console.log("WebSocket error, reconectando...");
-      setTimeout(connectWebSocket, 1000);
-    });
-    
-    kickWS.addEventListener("close", () => {
-      console.log("WebSocket cerrado, reconectando...");
-      setTimeout(connectWebSocket, 1000);
-    });
-  }
 
-  function handleChatMessage(data) {
-    if (messageIds.has(data.id)) return;
-    messageIds.add(data.id);
-    
-    const message = {
-      id: data.id,
-      content: data.content,
-      sender: {
-        id: data.sender.id,
-        username: data.sender.username,
-        identity: {
-          color: data.sender.identity?.color || "#00ff66",
-          badges: data.sender.identity?.badges || []
-        }
-      },
-      identity: data.sender.identity
-    };
-    
-    addMessage(message);
-  }
-
-  function removeMessage(messageId) {
-    const msgElement = document.getElementById(messageId);
-    if (msgElement) msgElement.remove();
-  }
-
-  function removeUserMessages(userId) {
-    document.querySelectorAll(`[data-user-id="${userId}"]`).forEach(msg => msg.remove());
+    kickWS.addEventListener("error", () => setTimeout(connectWebSocket, 1000));
+    kickWS.addEventListener("close", () => setTimeout(connectWebSocket, 1000));
   }
 
   async function fetchInitialMessages() {
     if (!CHAT_URL) return;
-    
     try {
       const data = await raceFetch(CHAT_URL);
-      let messages = data?.data?.messages || data?.messages || [];
-      
-      if (messages && messages.length > 0) {
-        messages.reverse().forEach(m => {
-          if (!messageIds.has(m.id)) {
-            messageIds.add(m.id);
-            addMessage(m);
-          }
-        });
-      }
-    } catch (err) {}
+      const messages = data?.data?.messages || data?.messages || [];
+      messages.reverse().forEach(m => {
+        if (!messageIds.has(m.id)) {
+          messageIds.add(m.id);
+          addMessage(m);
+        }
+      });
+    } catch (e) {}
   }
 
+  // ============ EVENT LISTENERS ============
   copyLinkBtn.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(generatedLink.value);
-      copyLinkBtn.textContent = "Copiado!";
-      setTimeout(() => { copyLinkBtn.textContent = "📋 Copiar"; }, 2000);
-    } catch (err) {
-      generatedLink.select();
-      document.execCommand("copy");
-      copyLinkBtn.textContent = "Copiado!";
-      setTimeout(() => { copyLinkBtn.textContent = "📋 Copiar"; }, 2000);
-    }
+    await navigator.clipboard.writeText(generatedLink.value);
+    copyLinkBtn.textContent = "Copiado!";
+    setTimeout(() => copyLinkBtn.textContent = "📋 Copiar", 2000);
   });
 
-  openLinkBtn.addEventListener("click", () => {
-    window.open(generatedLink.value, "_blank");
-  });
+  openLinkBtn.addEventListener("click", () => window.open(generatedLink.value, "_blank"));
 
   loadBtn.addEventListener("click", loadChat);
-  channelInput.addEventListener("keypress", (e) => {
-    if (e.key === "Enter") loadChat();
-  });
+  channelInput.addEventListener("keypress", e => { if (e.key === "Enter") loadChat(); });
 
   window.addEventListener("DOMContentLoaded", () => {
-    const channelParam = getUrlParams();
-    if (channelParam) {
-      channelInput.value = channelParam;
+    const param = getUrlParams();
+    if (param) {
+      channelInput.value = param;
       loadChat();
     }
   });
-
-  function addMessage(m) {
-    const username = m.sender?.username || "Anónimo";
-    const userId = m.sender?.id || "";
-    const messageId = m.id || "";
-    const badgesHTML = generateBadges(m);
-    const nameStyle = generateNamePaint(m);
-    const processedContent = processEmotes(m.content);
-    
-    const msg = document.createElement("div");
-    msg.className = "msg";
-    msg.id = messageId;
-    msg.setAttribute("data-user-id", userId);
-    msg.innerHTML = `<span class="meta"><span class="user" style="${nameStyle}">${badgesHTML}${username}</span></span><span class="text">${processedContent}</span>`;
-    chatDiv.appendChild(msg);
-    chatDiv.scrollTop = chatDiv.scrollHeight;
-  }
 </script>
 
 </body>
