@@ -187,8 +187,9 @@
   </section>
 
 <script>
-  // Proxy CORS
-  const CORS_PROXY = "https://corsproxy.io/?";
+  // Proxy CORS - AllOrigins (gratuito y estable)
+  const CORS_PROXY = "https://api.allorigins.win/raw?url=";
+  const CORS_PROXY_FALLBACK = "https://corsproxy.io/?";
   
   // WebSocket de Pusher
   const PUSHER_WS_URL = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=7.6.0&flash=false";
@@ -279,7 +280,18 @@
       return await res.json();
     } catch (err) {
       clearTimeout(timeoutId);
-      throw err;
+      // Retry with fallback proxy
+      const controller2 = new AbortController();
+      const timeoutId2 = setTimeout(() => controller2.abort(), timeout);
+      try {
+        const fallbackUrl = CORS_PROXY_FALLBACK + encodeURIComponent(url);
+        const res2 = await fetch(fallbackUrl, { signal: controller2.signal, cache: 'no-store' });
+        clearTimeout(timeoutId2);
+        return await res2.json();
+      } catch (err2) {
+        clearTimeout(timeoutId2);
+        throw err2;
+      }
     }
   }
 
