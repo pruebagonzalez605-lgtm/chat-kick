@@ -107,11 +107,30 @@
     }
 
     .username-text {
-      display: inline;
+      display: inline-block;
+      position: relative;
       line-height: inherit;
       vertical-align: baseline;
       background-size: 100%;
       background-repeat: no-repeat;
+    }
+
+    .username-text[data-7tv-overlay="true"]::after {
+      content: attr(data-username);
+      position: absolute;
+      inset: 0;
+      color: transparent;
+      background-image: var(--seventv-paint-bg);
+      background-size: cover;
+      background-position: center;
+      background-repeat: repeat;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      opacity: var(--seventv-paint-opacity, 0.48);
+      text-shadow: none;
+      filter: none;
+      pointer-events: none;
     }
     
     .user::after {
@@ -236,6 +255,44 @@
     "subscriber": "assets/subscriber.png",
     "sub_gifter": "assets/sub_gifter.png",
     "founder": "assets/founder.png"
+  };
+
+  const KICK_USERNAME_COLORS = [
+    "#00ff66", "#53fc18", "#00c7ff", "#0095ff", "#1da1f2", "#00aeef",
+    "#2f80ed", "#5865f2", "#8b5cf6", "#a855f7", "#d946ef", "#ff4ecd",
+    "#ff5c8a", "#ff3864", "#e9113c", "#ff6a4a", "#ff9500", "#ffc900",
+    "#facc15", "#22c55e", "#14b8a6", "#06b6d4"
+  ];
+
+  const KICK_USERNAME_OVERRIDES = {
+    "collin_0108": "#00aeef",
+    "txc_matheo": "#c65cff",
+    "fabian_rms": "#ff3864"
+  };
+
+  const ENABLE_7TV_NAME_PAINTS = new URLSearchParams(window.location.search).get("paints") !== "off";
+
+  const KICK_USERNAME_COLOR_NAMES = {
+    green: "#00ff66",
+    kick: "#53fc18",
+    lime: "#53fc18",
+    cyan: "#00c7ff",
+    aqua: "#00c7ff",
+    sky: "#00aeef",
+    blue: "#0095ff",
+    royal: "#2f80ed",
+    indigo: "#5865f2",
+    purple: "#8b5cf6",
+    violet: "#a855f7",
+    magenta: "#d946ef",
+    pink: "#ff4ecd",
+    rose: "#ff5c8a",
+    red: "#e9113c",
+    coral: "#ff6a4a",
+    orange: "#ff9500",
+    gold: "#ffc900",
+    yellow: "#facc15",
+    teal: "#14b8a6"
   };
 
   const STREAMER_CUSTOM_7TV_SETS = {
@@ -414,6 +471,10 @@
   // ============ Resto del código (sin cambios importantes) ============
 
   let seventvUserCache = {};
+  let seventvGlobalPaintsPromise = null;
+  let seventvPaintUsersById = {};
+  const injected7TVPaintClasses = new Set();
+  const injected7TVPaintOverlays = {};
 
   function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, ch => ({
@@ -452,12 +513,85 @@
     return fallback;
   }
 
+  function pickByUsername(username, options) {
+    const text = String(username || "");
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+      hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    }
+    return options[Math.abs(hash) % options.length];
+  }
+
+  function normalizeKickUsernameColor(value, fallback = null) {
+    if (typeof value === "string") {
+      const namedColor = KICK_USERNAME_COLOR_NAMES[value.trim().toLowerCase()];
+      if (namedColor) return namedColor;
+    }
+    return to7TVColor(value, fallback);
+  }
+
+  function getKickUsernameColor(m) {
+    const identity = m.identity || m.sender?.identity || {};
+    const sender = m.sender || {};
+    const normalizedUsername = sender.username?.toLowerCase();
+
+    if (normalizedUsername && KICK_USERNAME_OVERRIDES[normalizedUsername]) {
+      return KICK_USERNAME_OVERRIDES[normalizedUsername];
+    }
+
+    const colorCandidates = [
+      identity.color,
+      identity.colour,
+      identity.name_color,
+      identity.nameColour,
+      identity.nameColor,
+      identity.username_color,
+      identity.usernameColour,
+      identity.usernameColor,
+      identity.chat_color,
+      identity.chatColour,
+      identity.chatColor,
+      sender.color,
+      sender.colour,
+      sender.name_color,
+      sender.nameColour,
+      sender.nameColor,
+      sender.username_color,
+      sender.usernameColour,
+      sender.usernameColor,
+      sender.chat_color,
+      sender.chatColour,
+      sender.chatColor
+    ];
+
+    for (const value of colorCandidates) {
+      const color = normalizeKickUsernameColor(value, null);
+      if (color) return color;
+    }
+
+    return pickByUsername(sender.username, KICK_USERNAME_COLORS);
+  }
+
   function normalize7TVUrl(url) {
     if (!url) return "";
     if (url.startsWith("http")) return url;
     if (url.startsWith("//")) return `https:${url}`;
     if (url.startsWith("/")) return `https://cdn.7tv.app${url}`;
     return url;
+  }
+
+  function get7TVPaintClassName(paintId) {
+    return `seventv-paint-${String(paintId || "").replace(/[^a-z0-9_-]/gi, "-")}`;
+  }
+
+  function get7TVPaintStyleSheet() {
+    let styleEl = document.getElementById("seventv-paint-styles");
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = "seventv-paint-styles";
+      document.head.appendChild(styleEl);
+    }
+    return styleEl;
   }
 
   function get7TVAssetUrl(asset) {
@@ -481,6 +615,44 @@
 
     if (host?.url && file?.name) return normalize7TVUrl(`${host.url}/${file.name}`);
     return "";
+  }
+
+  function get7TVPaintImageUrl(asset) {
+    const images = asset?.images || asset?.image?.images || [];
+    if (images.length) {
+      return normalize7TVUrl(
+        images.find(img => img.mime === "image/webp" && img.scale >= 4 && !img.url.includes("_static"))?.url
+        || images.find(img => img.mime === "image/webp" && !img.url.includes("_static"))?.url
+        || images.find(img => img.mime === "image/gif" && img.scale >= 4)?.url
+        || images.find(img => img.mime === "image/gif")?.url
+        || images.find(img => img.scale >= 4 && !img.url.includes("_static"))?.url
+        || images.find(img => !img.url.includes("_static"))?.url
+        || images.find(img => img.mime === "image/webp" && img.scale >= 4)?.url
+        || images.find(img => img.mime === "image/webp")?.url
+        || images[0]?.url
+      );
+    }
+
+    return get7TVAssetUrl(asset);
+  }
+
+  function get7TVPaintLayers(paint) {
+    const layers = paint?.data?.layers || paint?.layers || [];
+    if (Array.isArray(layers) && layers.length) return layers;
+
+    if (paint?.gradients?.length) {
+      return paint.gradients.map(gradient => ({ gradient }));
+    }
+
+    return [];
+  }
+
+  function collect7TVPaintUserIds(paint) {
+    return [
+      ...(paint?.user_ids || []),
+      ...(paint?.userIds || []),
+      ...(paint?.users || []).map(user => user?.id || user?.user_id || user?.userId)
+    ].filter(Boolean).map(String);
   }
 
   function pickActive7TVPaint(user) {
@@ -548,6 +720,85 @@
     }
 
     throw lastError || new Error("7TV GraphQL error");
+  }
+
+  async function fetch7TVV3GraphQL(query, variables = {}) {
+    const res = await fetch("https://7tv.io/v3/gql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ query, variables }),
+      cache: "no-store"
+    });
+
+    if (!res.ok) throw new Error(`7TV v3 GraphQL ${res.status}`);
+    const json = await res.json();
+    if (json.errors?.length) throw new Error(json.errors[0].message || "7TV v3 GraphQL error");
+    return json.data;
+  }
+
+  const SEVENTV_GLOBAL_PAINTS_QUERY = `
+    query {
+      cosmetics {
+        paints {
+          id
+          name
+          color
+          gradients {
+            function
+            canvas_repeat
+            canvas_size
+            at
+            stops { at color }
+            image_url
+            shape
+            angle
+            repeat
+          }
+          shadows { x_offset y_offset radius color }
+          text {
+            weight
+            transform
+            variant
+            shadows { x_offset y_offset radius color }
+          }
+        }
+      }
+    }
+  `;
+
+  async function fetch7TVGlobalPaints() {
+    if (!seventvGlobalPaintsPromise) {
+      seventvGlobalPaintsPromise = fetch7TVV3GraphQL(SEVENTV_GLOBAL_PAINTS_QUERY)
+        .then(data => {
+          const paints = data?.cosmetics?.paints || [];
+          seventvPaintUsersById = {};
+          paints.forEach(paint => {
+            collect7TVPaintUserIds(paint).forEach(userId => {
+              seventvPaintUsersById[userId] = paint.id;
+            });
+          });
+          return Object.fromEntries(paints.map(p => [p.id, p]));
+        })
+        .catch(err => {
+          seventvGlobalPaintsPromise = null;
+          throw err;
+        });
+    }
+
+    return seventvGlobalPaintsPromise;
+  }
+
+  async function enrich7TVPaintFromGlobal(paint) {
+    if (!paint?.id) return paint || null;
+
+    try {
+      const paintsById = await fetch7TVGlobalPaints();
+      const globalPaint = paintsById[paint.id];
+      return globalPaint ? { ...paint, ...globalPaint } : paint;
+    } catch (err) {
+      console.warn("7TV global paints failed:", err);
+      return paint;
+    }
   }
 
   const SEVENTV_USER_STYLE_QUERY = `
@@ -643,6 +894,7 @@
         });
         const cosmetics = normalize7TVGraphQLUser(data, kickUserId, username);
         if (cosmetics?.paint || cosmetics?.badges?.length) {
+          cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
           seventvUserCache[cacheKey] = cosmetics;
           return cosmetics;
         }
@@ -660,6 +912,7 @@
         paint: pickActive7TVPaint(data.user),
         badges: pickActive7TVBadges(data.user)
       };
+      cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
       seventvUserCache[cacheKey] = cosmetics;
       return cosmetics;
     } catch {
@@ -771,98 +1024,143 @@
     return result;
   }
 
-  function generateNamePaint(m, cosmetics) {
-    const base = m.identity?.color || m.sender?.identity?.color || "#00ff66";
-    if (!cosmetics?.paint) return `color: ${base};`;
-
-    const p = cosmetics.paint;
-    const layers = p.data?.layers || [];
-    const v4Shadows = p.data?.shadows || [];
-    const stopsData = p.gradient?.stops || p.stops || p.data?.stops || [];
-    const angle = p.gradient?.angle ?? p.angle ?? p.data?.angle ?? 90;
-    const paintFunction = String(p.gradient?.function || p.function || p.data?.function || "").toUpperCase();
-    let style = `color: ${base};`;
-
-    if (Array.isArray(layers) && layers.length) {
-      const backgroundLayers = [];
-      let solidColor = null;
-
-      layers.forEach(layer => {
-        const ty = layer.ty || {};
-
-        if (ty.__typename === "PaintLayerTypeSingleColor" && ty.color) {
-          solidColor = to7TVColor(ty.color, base);
-          return;
-        }
-
-        if (ty.__typename === "PaintLayerTypeLinearGradient" && ty.stops?.length) {
-          const stops = ty.stops
-            .map(s => `${to7TVColor(s.color, base)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
-            .join(", ");
-          backgroundLayers.push(`linear-gradient(${ty.angle || 90}deg, ${stops})`);
-          return;
-        }
-
-        if (ty.__typename === "PaintLayerTypeRadialGradient" && ty.stops?.length) {
-          const stops = ty.stops
-            .map(s => `${to7TVColor(s.color, base)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
-            .join(", ");
-          backgroundLayers.push(`radial-gradient(circle, ${stops})`);
-          return;
-        }
-
-        if (ty.__typename === "PaintLayerTypeImage") {
-          const imageUrl = get7TVAssetUrl(ty);
-          if (imageUrl) backgroundLayers.push(`url("${imageUrl}")`);
-        }
+  function build7TVShadowStyles(shadowsData) {
+    const shadows = (shadowsData || [])
+      .map(s => {
+        const color = to7TVColor(s.color, "rgba(0,0,0,.85)");
+        const x = s.x_offset ?? s.offsetX ?? 0;
+        const y = s.y_offset ?? s.offsetY ?? 0;
+        const blur = s.radius ?? s.blur ?? 0;
+        return { x, y, blur, color };
       });
 
-      if (backgroundLayers.length) {
-        style = `color: ${solidColor || base}; background-image: ${backgroundLayers.join(", ")}; background-color: currentColor; background-size: cover; background-position: center; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px; text-shadow: none;`;
-      } else if (solidColor) {
-        style = `color: ${solidColor};`;
+    if (!shadows.length) return "";
+
+    const textShadow = shadows
+      .map(s => `${s.x}px ${s.y}px ${s.blur}px ${s.color}`)
+      .join(", ");
+    const filterShadow = shadows
+      .map(s => `drop-shadow(${s.x}px ${s.y}px ${s.blur}px ${s.color})`)
+      .join(" ");
+
+    return ` text-shadow: ${textShadow}; filter: ${filterShadow};`;
+  }
+
+  function build7TVTextShadowStyle(shadowsData) {
+    const textShadow = (shadowsData || [])
+      .map(s => {
+        const color = to7TVColor(s.color, "rgba(0,0,0,.85)");
+        const x = s.x_offset ?? s.offsetX ?? 0;
+        const y = s.y_offset ?? s.offsetY ?? 0;
+        const blur = s.radius ?? s.blur ?? 0;
+        return `${x}px ${y}px ${blur}px ${color}`;
+      })
+      .filter(Boolean)
+      .join(", ");
+
+    return textShadow ? ` text-shadow: ${textShadow};` : "";
+  }
+
+  function build7TVPaintBackgroundLayers(paint, base) {
+    const backgroundLayers = [];
+    const solidColors = [];
+
+    get7TVPaintLayers(paint).forEach(layer => {
+      const ty = layer.ty || layer.image || {};
+      const gradient = layer.gradient || layer.linearGradient || layer.radialGradient || ty;
+
+      if (ty.__typename === "PaintLayerTypeSingleColor" && ty.color) {
+        solidColors.push(to7TVColor(ty.color, base));
+        return;
       }
-    } else if (Array.isArray(stopsData) && stopsData.length) {
-      const stops = stopsData
+
+      if ((ty.__typename === "PaintLayerTypeLinearGradient" || ty.__typename === "PaintLayerTypeRadialGradient") && ty.stops?.length) {
+        const stops = ty.stops
+          .map(s => `${to7TVColor(s.color, base)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
+          .join(", ");
+        backgroundLayers.push(
+          ty.__typename === "PaintLayerTypeRadialGradient"
+            ? `radial-gradient(circle, ${stops})`
+            : `linear-gradient(${ty.angle || 90}deg, ${stops})`
+        );
+        return;
+      }
+
+      const imageUrl = get7TVPaintImageUrl(ty) || get7TVPaintImageUrl(layer);
+      if (imageUrl) {
+        backgroundLayers.push(`url("${imageUrl}")`);
+        return;
+      }
+
+      const gradientFunction = String(gradient.function || "").toUpperCase();
+      const gradientImageUrl = normalize7TVUrl(gradient.image_url || "");
+      if (gradientImageUrl && gradientFunction.includes("URL")) {
+        backgroundLayers.push(`url("${gradientImageUrl}")`);
+        return;
+      }
+
+      const stops = (gradient.stops || [])
         .map(s => {
           const color = to7TVColor(s.color, base);
-          const rawAt = Number(s.at ?? s.position ?? 0);
+          const rawAt = Number(s.at ?? 0);
           const at = Math.max(0, Math.min(1, rawAt > 1 ? rawAt / 100 : rawAt));
           return `${color} ${at * 100}%`;
         })
         .join(", ");
 
       if (stops) {
-        const gradient = paintFunction.includes("RADIAL")
-          ? `radial-gradient(circle, ${stops})`
-          : `linear-gradient(${angle}deg, ${stops})`;
-        style = `color: ${base}; background-image: ${gradient}; background-color: currentColor; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px; text-shadow: none;`;
+        backgroundLayers.push(
+          gradientFunction.includes("RADIAL")
+            ? `radial-gradient(${gradient.shape || "circle"}, ${stops})`
+            : `linear-gradient(${gradient.angle || 90}deg, ${stops})`
+        );
       }
-    } else {
-      const imageUrl = normalize7TVUrl(p.image_url || p.data?.image_url || p.url || "");
-      const color = to7TVColor(p.color ?? p.data?.color, null);
-      if (imageUrl && (paintFunction.includes("URL") || paintFunction.includes("IMAGE"))) {
-        style = `color: ${base}; background-image: url("${imageUrl}"); background-color: currentColor; background-size: cover; background-position: center; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px; text-shadow: none;`;
-      } else if (color) {
-        style = `color: ${color};`;
-      }
+    });
+
+    return {
+      backgroundLayers,
+      solidColor: solidColors.find(Boolean) || to7TVColor(paint?.color, null)
+    };
+  }
+
+  function ensure7TVPaintClass(paint, base) {
+    if (!paint?.id) return "";
+
+    const className = get7TVPaintClassName(paint.id);
+    if (injected7TVPaintClasses.has(className)) {
+      return { className, hasOverlay: !!injected7TVPaintOverlays[className] };
     }
 
-    const shadowsData = p.shadows?.length ? p.shadows : v4Shadows;
-    if (shadowsData?.length) {
-      const shadows = shadowsData
-        .map(s => {
-          const color = to7TVColor(s.color, "rgba(0,0,0,.85)");
-          const x = s.x_offset ?? s.offsetX ?? 0;
-          const y = s.y_offset ?? s.offsetY ?? 0;
-          const blur = s.radius ?? s.blur ?? 0;
-          return `drop-shadow(${x}px ${y}px ${blur}px ${color})`;
-        })
-        .join(" ");
-      style += ` filter: ${shadows};`;
-    }
+    const { backgroundLayers, solidColor } = build7TVPaintBackgroundLayers(paint, base);
+    const shadowsData = [
+      ...(paint.shadows || []),
+      ...(paint.text?.shadows || []),
+      ...(!paint.shadows?.length && !paint.text?.shadows?.length ? (paint.data?.shadows || []) : [])
+    ];
+    const hasImageLayer = backgroundLayers.some(layer => layer.startsWith("url("));
+    const shadowStyles = hasImageLayer ? "" : build7TVShadowStyles(shadowsData);
+    const color = solidColor || "var(--kick-name-color)";
+    const declarations = hasImageLayer
+      ? `color: ${color}; --seventv-paint-bg: ${backgroundLayers.join(", ")}; --seventv-paint-opacity: 0.62;${shadowStyles}`
+      : backgroundLayers.length
+        ? `color: ${color}; background-image: ${backgroundLayers.join(", ")}; background-color: currentColor; background-size: cover; background-position: center; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;${shadowStyles}`
+        : `color: ${color};${shadowStyles}`;
 
-    return style;
+    get7TVPaintStyleSheet().appendChild(document.createTextNode(`.${className}{${declarations}}\n`));
+    injected7TVPaintClasses.add(className);
+    injected7TVPaintOverlays[className] = hasImageLayer;
+    return { className, hasOverlay: hasImageLayer };
+  }
+
+  function generateNamePaint(m, cosmetics) {
+    const base = getKickUsernameColor(m);
+    const style = `--kick-name-color: ${base}; color: ${base};`;
+    const paintClass = ENABLE_7TV_NAME_PAINTS ? ensure7TVPaintClass(cosmetics?.paint, base) : null;
+    return {
+      style,
+      className: paintClass?.className || "",
+      hasOverlay: !!paintClass?.hasOverlay
+    };
   }
 
   async function addMessage(m) {
@@ -875,7 +1173,7 @@
     const cosmetics = await fetch7TVUserCosmetics(kickUserId, username);
 
     const badgesHTML = generateBadges(m, cosmetics);
-    const nameStyle = generateNamePaint(m, cosmetics);
+    const namePaint = generateNamePaint(m, cosmetics);
     const paintName = cosmetics?.paint?.name || "";
     const badgeNames = cosmetics?.badges?.map(b => b.name || b.tooltip).filter(Boolean).join(", ") || "";
     const cosmeticsTitle = [paintName && `7TV paint: ${paintName}`, badgeNames && `7TV badge: ${badgeNames}`].filter(Boolean).join(" | ");
@@ -885,7 +1183,7 @@
     msg.className = "msg";
     msg.innerHTML = `
       <span class="meta">
-        <span class="user">${badgesHTML}<span class="username-text" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${nameStyle}">${escapeHTML(username)}</span></span>
+        <span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-overlay="${namePaint.hasOverlay ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span>
       </span>
       <span class="text">${content}</span>
     `;
