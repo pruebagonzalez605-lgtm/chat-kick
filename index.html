@@ -127,7 +127,7 @@
       -webkit-background-clip: text;
       background-clip: text;
       -webkit-text-fill-color: transparent;
-      opacity: var(--seventv-paint-opacity, 0.48);
+      opacity: var(--seventv-paint-opacity, 1.0);
       text-shadow: none;
       filter: none;
       pointer-events: none;
@@ -222,6 +222,7 @@
   const PUSHER_WS_URL = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=7.6.0&flash=false";
   
   let CHANNEL_ID = null;
+  let USER_ID = null;
   let CHATROOM_ID = null;
   let CHAT_URL = null;
   let currentChannel = null;
@@ -236,6 +237,8 @@
   const copyLinkBtn = document.getElementById("copy-link-btn");
   const openLinkBtn = document.getElementById("open-link-btn");
   let messageIds = new Set();
+  let seventvEmoteSetId = null;   // ID del emote set del canal en 7TV
+  let seventvEventSource = null;  // SSE connection al EventAPI de 7TV
 
   // ============ STORAGE ============
   let emotesData = {
@@ -265,9 +268,7 @@
   ];
 
   const KICK_USERNAME_OVERRIDES = {
-    "collin_0108": "#00aeef",
-    "txc_matheo": "#c65cff",
-    "fabian_rms": "#ff3864"
+    
   };
 
   const ENABLE_7TV_NAME_PAINTS = new URLSearchParams(window.location.search).get("paints") !== "off";
@@ -295,11 +296,7 @@
     teal: "#14b8a6"
   };
 
-  const STREAMER_CUSTOM_7TV_SETS = {
-    "carlogato": ["01HTTD778R000E3Y75DEQDXPKB"],
-    "elshark": ["01KKFNJR4WRG7W82S12R3W1TWW"],
-    "elviejoesteban": ["01JPCFHR3A28YZR5VA53J8W2MJ"],
-  };
+
 
   // ============ FETCH HELPERS ============
   function getUrlParams() {
@@ -392,7 +389,6 @@
       if (Object.keys(subBadgesByMonths).length > 0) {
         const meses = Object.keys(subBadgesByMonths).sort((a,b)=>Number(a)-Number(b)).join(', ');
         statusMsg.textContent += ` | ${Object.keys(subBadgesByMonths).length} sub-badges (meses: ${meses})`;
-        console.log("Sub-badges cargados:", subBadgesByMonths);
       } else {
         statusMsg.textContent += " | No sub-badges personalizados";
       }
@@ -445,11 +441,11 @@
           badgeUrl = "https://files.kick.com/channel_subscriber_badges/754874/original";
         }
 
-        html += `<img src="${badgeUrl}" alt="Suscriptor ${monthsRaw} meses" class="badge-icon" title="Suscriptor ${monthsRaw} meses (tier ${key})">`;
+        html += `<img src="${badgeUrl}" alt="Suscriptor ${monthsRaw} meses" class="badge-icon" title="Suscriptor ${monthsRaw} meses (tier ${key})" onerror="this.style.display='none'">`;
       } else {
         const icon = KICK_BADGES[tipo];
         if (icon) {
-          html += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
+          html += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon" onerror="this.style.display='none'">`;
         }
       }
     });
@@ -457,10 +453,11 @@
     // 7TV badges
     if (cosmetics?.badges?.length) {
       cosmetics.badges.forEach(b => {
-        const url = get7TVAssetUrl(b);
-        if (url) {
+        const { src, srcset } = get7TVBadgeSrcSet(b);
+        if (src) {
           const title = escapeHTML(b.tooltip || b.name || '7TV');
-          html += `<img src="${url}" alt="${title}" title="${title}" class="badge-icon">`;
+          const srcsetAttr = srcset ? ` srcset="${escapeHTML(srcset)}"` : "";
+          html += `<img src="${src}"${srcsetAttr} alt="${title}" title="${title}" class="badge-icon" onerror="this.style.display='none'">`;
         }
       });
     }
@@ -471,10 +468,13 @@
   // ============ Resto del código (sin cambios importantes) ============
 
   let seventvUserCache = {};
+  const seventvUserCachePromises = {}; // evita requests duplicados en vuelo
   let seventvGlobalPaintsPromise = null;
   let seventvPaintUsersById = {};
   const injected7TVPaintClasses = new Set();
   const injected7TVPaintOverlays = {};
+  const injected7TVPaintHasLayers = {};
+  const seventvEntitlementDebounce = {}; // debounce para eventos de entitlement por usuario
 
   function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, ch => ({
@@ -495,7 +495,17 @@
       }
       if (value.hex) return to7TVColor(value.hex, fallback);
     }
-    if (typeof value === "number") return `#${value.toString(16).padStart(6, "0").slice(-6)}`;
+    if (typeof value === "number") {
+      // 7TV empaqueta colores como int32 con signo en formato ARGB (A=bits 31-24, R=23-16, G=15-8, B=7-0)
+      const u = value >>> 0;
+      const a = ((u >>> 24) & 0xff) / 255;
+      const r = (u >>> 16) & 0xff;
+      const g = (u >>> 8)  & 0xff;
+      const b =  u         & 0xff;
+      if (a >= 0.99) return `rgb(${r}, ${g}, ${b})`;
+      if (a <= 0.01) return fallback;   // alpha=0 → sin color definido, usar fallback
+      return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
+    }
     if (typeof value === "string") {
       const hex = value.startsWith("#") ? value.slice(1) : value;
       if (/^[0-9a-f]{8}$/i.test(hex)) {
@@ -503,11 +513,12 @@
         const g = parseInt(hex.slice(2, 4), 16);
         const b = parseInt(hex.slice(4, 6), 16);
         const a = parseInt(hex.slice(6, 8), 16) / 255;
-        return `rgba(${r}, ${g}, ${b}, ${a})`;
+        if (a >= 0.99) return `rgb(${r}, ${g}, ${b})`;
+        return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
       }
       if (/^#[0-9a-f]{3,6}$/i.test(value)) return value;
       if (/^[0-9a-f]{6}$/i.test(value)) return `#${value}`;
-      if (/^\d+$/.test(value)) return to7TVColor(Number(value), fallback);
+      if (/^-?\d+$/.test(value)) return to7TVColor(Number(value), fallback);
       if (/^(rgb|hsl)a?\(/i.test(value)) return value;
     }
     return fallback;
@@ -528,6 +539,22 @@
       if (namedColor) return namedColor;
     }
     return to7TVColor(value, fallback);
+  }
+
+  // Devuelve true si el color es demasiado claro para usarse en fondo oscuro
+  function isColorTooLight(cssColor) {
+    if (!cssColor) return false;
+    // Detectar blanco puro o casi blanco (#fff, #ffffff, rgb(255,255,255), etc.)
+    const clean = cssColor.replace(/\s/g, "").toLowerCase();
+    if (clean === "#fff" || clean === "#ffffff" || clean === "white") return true;
+    const m = clean.match(/^rgb\((\d+),(\d+),(\d+)\)$/);
+    if (m) {
+      const [r, g, b] = m.slice(1).map(Number);
+      // Luminancia relativa: si > 0.85, demasiado claro
+      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      return lum > 0.85;
+    }
+    return false;
   }
 
   function getKickUsernameColor(m) {
@@ -566,7 +593,8 @@
 
     for (const value of colorCandidates) {
       const color = normalizeKickUsernameColor(value, null);
-      if (color) return color;
+      // Ignorar colores demasiado claros (blanco/casi blanco) en fondo oscuro
+      if (color && !isColorTooLight(color)) return color;
     }
 
     return pickByUsername(sender.username, KICK_USERNAME_COLORS);
@@ -594,13 +622,24 @@
     return styleEl;
   }
 
-  function get7TVAssetUrl(asset) {
+  function get7TVAssetUrl(asset, prefer1x = false) {
     if (asset?.images?.length) {
+      const imgs = asset.images;
+      if (prefer1x) {
+        // Para badges pequeños: preferir 1x webp, fallback 1x cualquier formato, luego 2x
+        return normalize7TVUrl(
+          imgs.find(img => img.mime === "image/webp" && img.scale === 1)?.url
+          || imgs.find(img => img.scale === 1)?.url
+          || imgs.find(img => img.mime === "image/webp" && img.scale === 2)?.url
+          || imgs.find(img => img.mime === "image/webp")?.url
+          || imgs[0]?.url
+        );
+      }
       return normalize7TVUrl(
-        asset.images.find(img => img.mime === "image/webp" && img.scale >= 2)?.url
-        || asset.images.find(img => img.mime === "image/webp")?.url
-        || asset.images.find(img => img.scale >= 2)?.url
-        || asset.images[0]?.url
+        imgs.find(img => img.mime === "image/webp" && img.scale >= 2)?.url
+        || imgs.find(img => img.mime === "image/webp")?.url
+        || imgs.find(img => img.scale >= 2)?.url
+        || imgs[0]?.url
       );
     }
 
@@ -609,12 +648,47 @@
 
     const host = asset?.host || asset?.data?.host;
     const files = host?.files || [];
-    const file = files.find(f => f.format === "WEBP" && /(?:2x|3x|4x)/i.test(f.name))
-              || files.find(f => f.format === "WEBP")
-              || files[0];
+    const file = prefer1x
+      ? (files.find(f => f.format === "WEBP" && f.name === "1x.webp")
+        || files.find(f => f.name === "1x.webp")
+        || files.find(f => f.format === "WEBP")
+        || files[0])
+      : (files.find(f => f.format === "WEBP" && /(?:2x|3x|4x)/i.test(f.name))
+        || files.find(f => f.format === "WEBP")
+        || files[0]);
 
     if (host?.url && file?.name) return normalize7TVUrl(`${host.url}/${file.name}`);
     return "";
+  }
+
+  // Genera src + srcset para badges de 7TV (usa images[] de v4 o host/files de v3)
+  function get7TVBadgeSrcSet(asset) {
+    const src = get7TVAssetUrl(asset, true);
+    if (!src) return { src: "", srcset: "" };
+
+    const imgs = asset?.images || [];
+    if (imgs.length >= 2) {
+      const webpImgs = imgs.filter(img => img.mime === "image/webp").sort((a, b) => a.scale - b.scale);
+      if (webpImgs.length >= 2) {
+        const srcset = webpImgs.map(img => `${normalize7TVUrl(img.url)} ${img.scale}x`).join(", ");
+        return { src, srcset };
+      }
+    }
+
+    // Fallback v3 host/files
+    const host = asset?.host || asset?.data?.host;
+    if (host?.url && host?.files?.length) {
+      const webpFiles = host.files.filter(f => f.format === "WEBP");
+      if (webpFiles.length >= 2) {
+        const srcset = webpFiles.map(f => {
+          const scale = f.name.match(/^(\d)x/)?.[1] || "1";
+          return `${normalize7TVUrl(`${host.url}/${f.name}`)} ${scale}x`;
+        }).join(", ");
+        return { src, srcset };
+      }
+    }
+
+    return { src, srcset: "" };
   }
 
   function get7TVPaintImageUrl(asset) {
@@ -695,31 +769,17 @@
   }
 
   async function fetch7TVGraphQL(query, variables) {
-    const endpoints = location.protocol.startsWith("http")
-      ? ["/api/7tv/gql", "https://7tv.io/v4/gql"]
-      : ["https://7tv.io/v4/gql"];
+    const res = await fetch("https://7tv.io/v4/gql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ query, variables }),
+      cache: "no-store"
+    });
 
-    let lastError = null;
-
-    for (const endpoint of endpoints) {
-      try {
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          body: JSON.stringify({ query, variables }),
-          cache: "no-store"
-        });
-
-        if (!res.ok) throw new Error(`7TV GraphQL ${res.status}`);
-        const json = await res.json();
-        if (json.errors?.length) throw new Error(json.errors[0].message || "7TV GraphQL error");
-        return json.data;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-
-    throw lastError || new Error("7TV GraphQL error");
+    if (!res.ok) throw new Error(`7TV GraphQL ${res.status}`);
+    const json = await res.json();
+    if (json.errors?.length) throw new Error(json.errors[0].message || "7TV GraphQL error");
+    return json.data;
   }
 
   async function fetch7TVV3GraphQL(query, variables = {}) {
@@ -788,20 +848,75 @@
     return seventvGlobalPaintsPromise;
   }
 
-  async function enrich7TVPaintFromGlobal(paint) {
-    if (!paint?.id) return paint || null;
+  // Caché de paints individuales fetcheados por ID
+  const seventvPaintByIdCache = {};
+
+  async function fetch7TVPaintById(paintId) {
+    if (seventvPaintByIdCache[paintId] !== undefined) return seventvPaintByIdCache[paintId];
+
+    // Query GraphQL v3 para un paint específico por ID
+    const query = `
+      query($id: ObjectID!) {
+        cosmetic(id: $id) {
+          ... on CosmeticPaint {
+            id name kind
+            color
+            gradients {
+              function canvas_repeat canvas_size at
+              stops { at color }
+              image_url shape angle repeat
+            }
+            shadows { x_offset y_offset radius color }
+            text { weight transform variant shadows { x_offset y_offset radius color } }
+          }
+        }
+      }
+    `;
 
     try {
-      const paintsById = await fetch7TVGlobalPaints();
-      const globalPaint = paintsById[paint.id];
-      return globalPaint ? { ...paint, ...globalPaint } : paint;
-    } catch (err) {
-      console.warn("7TV global paints failed:", err);
+      const data = await fetch7TVV3GraphQL(query, { id: paintId });
+      const paint = data?.cosmetic || null;
+      seventvPaintByIdCache[paintId] = paint;
       return paint;
+    } catch {
+      // v3/cosmetics REST también da 404 — no hay fallback REST disponible
+      seventvPaintByIdCache[paintId] = null;
+      return null;
     }
   }
 
-  const SEVENTV_USER_STYLE_QUERY = `
+  async function enrich7TVPaintFromGlobal(paint) {
+    if (!paint?.id) return paint || null;
+
+    // Si el paint ya tiene capas v4 (data.layers), no necesita enriquecimiento
+    const hasV4Layers = paint?.data?.layers?.length > 0;
+    if (hasV4Layers) return paint;
+
+    // Intentar con la caché global v3 primero (más rápido)
+    try {
+      const paintsById = await fetch7TVGlobalPaints();
+      const globalPaint = paintsById[paint.id];
+      if (globalPaint) {
+        return {
+          ...globalPaint,   // base v3 (gradients, color, shadows)
+          ...paint,         // datos v4 encima (data.layers, name, id)
+        };
+      }
+    } catch (err) {
+      console.warn("7TV global paints failed:", err);
+    }
+
+    // Si no está en el global, hacer fetch directo por ID (paints de suscripción/privados)
+    try {
+      const fetched = await fetch7TVPaintById(paint.id);
+      if (fetched) return { ...fetched, ...paint };
+    } catch {}
+
+    return paint;
+  }
+
+  // Query con platformId (cuando tenemos el ID de Kick)
+  const SEVENTV_QUERY_WITH_ID = `
     query($platformId: String!, $username: String!) {
       byConnection: users {
         userByConnection(platform: KICK, platformId: $platformId) {
@@ -858,22 +973,71 @@
     }
   `;
 
+  // Query solo por username (cuando NO tenemos platformId válido)
+  const SEVENTV_QUERY_SEARCH_ONLY = `
+    query($username: String!) {
+      bySearch: users {
+        search(query: $username, page: 1, perPage: 5) {
+          items {
+            id
+            mainConnection { platform platformId platformUsername }
+            style {
+              activePaint {
+                id name
+                data {
+                  layers {
+                    id opacity
+                    ty {
+                      __typename
+                      ... on PaintLayerTypeSingleColor { color { hex r g b a } }
+                      ... on PaintLayerTypeLinearGradient { angle repeating stops { at color { hex r g b a } } }
+                      ... on PaintLayerTypeRadialGradient { repeating shape stops { at color { hex r g b a } } }
+                      ... on PaintLayerTypeImage { images { url scale mime } }
+                    }
+                  }
+                  shadows { color { hex r g b a } offsetX offsetY blur }
+                }
+              }
+              activeBadge { id name images { url scale mime } }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  // 7TV requiere que el platformId sea un ID numérico válido (≥ cierta longitud)
+  function isValid7TVPlatformId(id) {
+    const s = String(id || "");
+    return /^\d{7,}$/.test(s);  // Kick IDs son numéricos y tienen varios dígitos
+  }
+
   function normalize7TVGraphQLUser(data, kickUserId, username) {
     const exact = data?.byConnection?.userByConnection;
     const items = data?.bySearch?.search?.items || [];
     const normalizedUsername = username?.toLowerCase();
     const hasCosmetics = user => !!(user?.style?.activePaint || user?.style?.activeBadge);
 
-    const searched = items.find(item => {
+    // 1. Coincidencia exacta por platformId de Kick (la más confiable)
+    const byId = items.find(item => {
       const connection = item.mainConnection || {};
       return connection.platform === "KICK"
-          && (!kickUserId || connection.platformId === String(kickUserId))
-          && (!normalizedUsername || connection.platformUsername?.toLowerCase() === normalizedUsername);
-    }) || items.find(item => item.mainConnection?.platformUsername?.toLowerCase() === normalizedUsername)
-       || items.find(item => item.mainConnection?.platform === "KICK")
-       || items[0];
+          && isValid7TVPlatformId(kickUserId)
+          && connection.platformId === String(kickUserId);
+    });
 
-    const user = hasCosmetics(searched) ? searched : (exact || searched);
+    // 2. Coincidencia exacta por username (case-insensitive, solo si el username coincide 100%)
+    const byUsername = items.find(item =>
+      item.mainConnection?.platformUsername?.toLowerCase() === normalizedUsername
+    );
+
+    // NO usar items[0] ni fallback por plataforma genérica — evita confundir usuarios similares
+    const searched = byId || byUsername || null;
+
+    // Preferir el resultado con cosméticos; byConnection tiene prioridad si tiene cosméticos
+    const user = hasCosmetics(exact) ? exact
+               : hasCosmetics(searched) ? searched
+               : (exact || searched);
     if (!user) return null;
 
     return {
@@ -884,14 +1048,27 @@
 
   async function fetch7TVUserCosmetics(kickUserId, username = "") {
     const cacheKey = kickUserId || username?.toLowerCase();
-    if (!cacheKey || seventvUserCache[cacheKey] !== undefined) return seventvUserCache[cacheKey];
+    if (!cacheKey) return null;
+    // Resultado ya cacheado
+    if (seventvUserCache[cacheKey] !== undefined) return seventvUserCache[cacheKey];
+    // Request ya en vuelo — reusar la misma promise
+    if (seventvUserCachePromises[cacheKey]) return seventvUserCachePromises[cacheKey];
+
+    seventvUserCachePromises[cacheKey] = _fetch7TVUserCosmeticsInner(kickUserId, username, cacheKey)
+      .finally(() => { delete seventvUserCachePromises[cacheKey]; });
+    return seventvUserCachePromises[cacheKey];
+  }
+
+  async function _fetch7TVUserCosmeticsInner(kickUserId, username, cacheKey) {
 
     if (username) {
       try {
-        const data = await fetch7TVGraphQL(SEVENTV_USER_STYLE_QUERY, {
-          platformId: String(kickUserId || ""),
-          username
-        });
+        const useIdQuery = isValid7TVPlatformId(kickUserId);
+        const query = useIdQuery ? SEVENTV_QUERY_WITH_ID : SEVENTV_QUERY_SEARCH_ONLY;
+        const variables = useIdQuery
+          ? { platformId: String(kickUserId), username }
+          : { username };
+        const data = await fetch7TVGraphQL(query, variables);
         const cosmetics = normalize7TVGraphQLUser(data, kickUserId, username);
         if (cosmetics?.paint || cosmetics?.badges?.length) {
           cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
@@ -903,22 +1080,43 @@
       }
     }
 
-    try {
-      const data = await smartFetch(`https://7tv.io/v3/users/kick/${kickUserId}`);
-      if (!data?.user) {
-        throw new Error("7TV v3 user not found");
+    // Fallback v3 por Kick ID — fetch silencioso para no loguear 404 en consola
+    if (isValid7TVPlatformId(kickUserId)) {
+      try {
+        const res = await fetch(`https://7tv.io/v3/users/kick/${kickUserId}`, {
+          method: 'GET', headers: { 'Accept': 'application/json' }, cache: 'no-store'
+        });
+        // 404 = usuario no tiene 7TV; cachear vacío sin lanzar error
+        if (res.status === 404) {
+          const empty = { paint: null, badges: [] };
+          seventvUserCache[cacheKey] = empty;
+          return empty;
+        }
+        if (!res.ok) throw new Error(`7TV v3 ${res.status}`);
+        const data = await res.json();
+        if (data?.user) {
+          const cosmetics = {
+            paint: pickActive7TVPaint(data.user),
+            badges: pickActive7TVBadges(data.user)
+          };
+          cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
+          seventvUserCache[cacheKey] = cosmetics;
+          return cosmetics;
+        }
+        // data sin .user → usuario sin 7TV, cachear null normalmente
+      } catch {
+        // 404 u otro error → cachear vacío para no repetir la petición en cada mensaje
+        const empty = { paint: null, badges: [] };
+        seventvUserCache[cacheKey] = empty;
+        return empty;
       }
-      const cosmetics = {
-        paint: pickActive7TVPaint(data.user),
-        badges: pickActive7TVBadges(data.user)
-      };
-      cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
-      seventvUserCache[cacheKey] = cosmetics;
-      return cosmetics;
-    } catch {
-      seventvUserCache[cacheKey] = null;
-      return null;
     }
+
+    // Nota: el endpoint v3 REST de búsqueda por username (7tv.io/v3/users?query=...) ya no existe (404).
+    // El fallback ahora es solo GraphQL v4 + v3/users/kick/{id}.
+
+    seventvUserCache[cacheKey] = null;
+    return null;
   }
 
   async function loadFFZData() {
@@ -965,31 +1163,40 @@
     } catch {}
   }
 
-  async function loadChannelCustom7TVSets(channelSlug) {
-    const setIds = STREAMER_CUSTOM_7TV_SETS[channelSlug?.toLowerCase()] || [];
-    if (!setIds.length) return;
+  async function loadChannel7TVEmotes(kickUserId) {
+    if (!kickUserId) return;
+    try {
+      // Obtener el usuario de 7TV usando el ID de Kick del streamer
+      const userData = await smartFetch(`https://7tv.io/v3/users/kick/${kickUserId}`);
+      const emoteSet = userData?.emote_set;
+      if (!emoteSet) return;
+      // Guardar el ID del emote set para conectar al EventAPI
+      if (emoteSet.id) seventvEmoteSetId = emoteSet.id;
+      if (!emoteSet.emotes?.length) return;
 
-    for (const setId of setIds) {
-      try {
-        const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
-        data.emotes?.forEach(e => {
-          const host = e.data.host;
-          const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-          if (file) {
-            emotesData.seventv.community[e.name] = {
-              url: `https:${host.url}/${file.name}`,
-              url2x: `https:${host.url}/${host.files[1]?.name || file.name}`
-            };
-          }
-        });
-      } catch {}
+      emoteSet.emotes.forEach(e => {
+        const host = e.data?.host;
+        if (!host) return;
+        const file = host.files?.find(f => f.format === 'WEBP') || host.files?.[0];
+        if (file) {
+          emotesData.seventv.community[e.name] = {
+            url: `https:${host.url}/${file.name}`,
+            url2x: `https:${host.url}/${host.files[1]?.name || file.name}`
+          };
+        }
+      });
+
+      const count = Object.keys(emotesData.seventv.community).length;
+      console.log(`7TV canal: ${count} emotes cargados (set: ${emoteSet.name || emoteSet.id})`);
+    } catch (err) {
+      console.warn("7TV emotes del canal no disponibles:", err.message);
     }
   }
 
-  async function loadAllThirdPartyData(channelSlug) {
+  async function loadAllThirdPartyData(channelSlug, kickUserId) {
     statusMsg.textContent = "Cargando emotes...";
     await Promise.all([
-      loadChannelCustom7TVSets(channelSlug),
+      loadChannel7TVEmotes(kickUserId),
       loadFFZData(),
       loadBTTVData(),
       load7TVData()
@@ -1017,7 +1224,7 @@
       const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       result = result.replace(
         new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g'),
-        `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" class="emote-third" alt="${code}" title="${code}">`
+        `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" class="emote-third" alt="${code}" title="${code}" onerror="this.style.display='none'">`
       );
     });
 
@@ -1068,21 +1275,45 @@
     get7TVPaintLayers(paint).forEach(layer => {
       const ty = layer.ty || layer.image || {};
       const gradient = layer.gradient || layer.linearGradient || layer.radialGradient || ty;
+      // Opacidad por layer (v4 API): 1.0 = totalmente opaco, <1 = semitransparente
+      const layerOpacity = (layer.opacity != null && layer.opacity >= 0 && layer.opacity <= 1)
+        ? layer.opacity : 1;
+
+      // Convierte un color con opacidad de layer multiplicada al alpha del color
+      const colorWithOpacity = (colorVal) => {
+        if (layerOpacity >= 1) return to7TVColor(colorVal, base);
+        const css = to7TVColor(colorVal, base);
+        if (!css) return css;
+        // Parsear rgba/rgb para inyectar alpha multiplicado
+        const mRgba = css.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
+        if (mRgba) {
+          const a = (mRgba[4] != null ? parseFloat(mRgba[4]) : 1) * layerOpacity;
+          return `rgba(${mRgba[1]}, ${mRgba[2]}, ${mRgba[3]}, ${a.toFixed(3)})`;
+        }
+        return css; // fallback si no se puede parsear
+      };
 
       if (ty.__typename === "PaintLayerTypeSingleColor" && ty.color) {
-        solidColors.push(to7TVColor(ty.color, base));
+        solidColors.push(colorWithOpacity(ty.color));
         return;
       }
 
       if ((ty.__typename === "PaintLayerTypeLinearGradient" || ty.__typename === "PaintLayerTypeRadialGradient") && ty.stops?.length) {
         const stops = ty.stops
-          .map(s => `${to7TVColor(s.color, base)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
+          .map(s => `${colorWithOpacity(s.color)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
           .join(", ");
-        backgroundLayers.push(
-          ty.__typename === "PaintLayerTypeRadialGradient"
-            ? `radial-gradient(circle, ${stops})`
-            : `linear-gradient(${ty.angle || 90}deg, ${stops})`
-        );
+        if (ty.__typename === "PaintLayerTypeRadialGradient") {
+          const shape = ty.shape || "circle";
+          backgroundLayers.push(ty.repeating
+            ? `repeating-radial-gradient(${shape}, ${stops})`
+            : `radial-gradient(${shape}, ${stops})`);
+        } else {
+          // 7TV almacena el ángulo ya en formato CSS (desde norte, sentido horario)
+          const cssAngle = Number(ty.angle ?? 90);
+          backgroundLayers.push(ty.repeating
+            ? `repeating-linear-gradient(${cssAngle}deg, ${stops})`
+            : `linear-gradient(${cssAngle}deg, ${stops})`);
+        }
         return;
       }
 
@@ -1109,11 +1340,32 @@
         .join(", ");
 
       if (stops) {
-        backgroundLayers.push(
-          gradientFunction.includes("RADIAL")
-            ? `radial-gradient(${gradient.shape || "circle"}, ${stops})`
-            : `linear-gradient(${gradient.angle || 90}deg, ${stops})`
-        );
+        // canvas_repeat + canvas_size de v3: el gradiente se repite en un tile de tamaño canvas_size
+        // Si canvas_size es 0.5 → background-size: 50% auto; background-repeat: repeat
+        const canvasRepeat = gradient.canvas_repeat ?? false;
+        const canvasSize   = Number(gradient.canvas_size || 0);
+        let bgSizeOverride = null;
+        if (canvasRepeat && canvasSize > 0) {
+          const pct = Math.round(canvasSize * 100);
+          bgSizeOverride = `${pct}%`;
+        }
+
+        if (gradientFunction.includes("RADIAL")) {
+          backgroundLayers.push(gradient.repeat
+            ? `repeating-radial-gradient(${gradient.shape || "circle"}, ${stops})`
+            : `radial-gradient(${gradient.shape || "circle"}, ${stops})`);
+        } else {
+          // 7TV v3: ángulo matemático (0=derecha, CCW) → convertir a CSS bearing (0=arriba, CW)
+          const cssAngle3 = 90 - Number(gradient.angle ?? 0);
+          backgroundLayers.push(gradient.repeat
+            ? `repeating-linear-gradient(${cssAngle3}deg, ${stops})`
+            : `linear-gradient(${cssAngle3}deg, ${stops})`);
+        }
+
+        // Si hay tile, adjuntar el override de tamaño como metadata para usarlo en CSS
+        if (bgSizeOverride) {
+          backgroundLayers._canvasSizeOverride = bgSizeOverride;
+        }
       }
     });
 
@@ -1127,8 +1379,17 @@
     if (!paint?.id) return "";
 
     const className = get7TVPaintClassName(paint.id);
+
+    // Verificar si el paint tiene capas reales; si ya está cacheado con datos buenos, reutilizar
+    const hasRealLayers = (paint?.data?.layers?.length > 0) || (paint?.gradients?.length > 0) || (paint?.color != null);
     if (injected7TVPaintClasses.has(className)) {
-      return { className, hasOverlay: !!injected7TVPaintOverlays[className] };
+      // Si está cacheado pero el paint actual tiene más datos, invalidar y reinyectar
+      const cachedHasLayers = injected7TVPaintHasLayers?.[className];
+      if (cachedHasLayers || !hasRealLayers) {
+        return { className, hasOverlay: !!injected7TVPaintOverlays[className] };
+      }
+      // Tiene nuevos datos — eliminar clase antigua y reinyectar
+      injected7TVPaintClasses.delete(className);
     }
 
     const { backgroundLayers, solidColor } = build7TVPaintBackgroundLayers(paint, base);
@@ -1138,24 +1399,44 @@
       ...(!paint.shadows?.length && !paint.text?.shadows?.length ? (paint.data?.shadows || []) : [])
     ];
     const hasImageLayer = backgroundLayers.some(layer => layer.startsWith("url("));
-    const shadowStyles = hasImageLayer ? "" : build7TVShadowStyles(shadowsData);
+    // Las sombras siempre van como filter:drop-shadow() — funciona con background-clip:text
+    // y con url() overlays. text-shadow NO funciona cuando -webkit-text-fill-color:transparent.
+    const shadowStyles = build7TVShadowStyles(shadowsData);
     const color = solidColor || "var(--kick-name-color)";
+
+    // background-size: cover para gradientes → el patrón se escala al contenedor completo
+    // en vez de estirarse letra a letra (100% 100%), igual que hace la extensión oficial.
+    // Si hay canvas_repeat con canvas_size → usar ese tamaño para tiling.
+    const bgSize = backgroundLayers._canvasSizeOverride
+      ? `${backgroundLayers._canvasSizeOverride} auto`
+      : "cover";
+    const bgRepeat = backgroundLayers._canvasSizeOverride ? "background-repeat: repeat;" : "";
     const declarations = hasImageLayer
-      ? `color: ${color}; --seventv-paint-bg: ${backgroundLayers.join(", ")}; --seventv-paint-opacity: 0.62;${shadowStyles}`
+      ? `color: ${color}; --seventv-paint-bg: ${backgroundLayers.join(", ")}; --seventv-paint-opacity: 1.0;${shadowStyles}`
       : backgroundLayers.length
-        ? `color: ${color}; background-image: ${backgroundLayers.join(", ")}; background-color: currentColor; background-size: cover; background-position: center; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;${shadowStyles}`
+        ? `color: ${color}; background-image: ${backgroundLayers.join(", ")}; background-color: currentColor; background-size: ${bgSize}; background-position: center; ${bgRepeat}-webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;${shadowStyles}`
         : `color: ${color};${shadowStyles}`;
 
     get7TVPaintStyleSheet().appendChild(document.createTextNode(`.${className}{${declarations}}\n`));
     injected7TVPaintClasses.add(className);
     injected7TVPaintOverlays[className] = hasImageLayer;
+    injected7TVPaintHasLayers[className] = hasRealLayers;
     return { className, hasOverlay: hasImageLayer };
   }
 
   function generateNamePaint(m, cosmetics) {
     const base = getKickUsernameColor(m);
     const style = `--kick-name-color: ${base}; color: ${base};`;
-    const paintClass = ENABLE_7TV_NAME_PAINTS ? ensure7TVPaintClass(cosmetics?.paint, base) : null;
+    const paint = cosmetics?.paint;
+
+    // Aplicar paint si tiene ID válido (aunque no tenga capas aún —
+    // enrich puede haberle agregado color/gradients desde la caché global v3)
+    const paintHasData = !!paint?.id;
+
+    const paintClass = (ENABLE_7TV_NAME_PAINTS && paintHasData)
+      ? ensure7TVPaintClass(paint, base)
+      : null;
+
     return {
       style,
       className: paintClass?.className || "",
@@ -1167,46 +1448,103 @@
     if (messageIds.has(m.id)) return;
     messageIds.add(m.id);
 
-    const username = m.sender?.username || "Anónimo";
+    const username = m.sender?.username || m.sender?.slug || "Anónimo";
     const kickUserId = m.sender?.id || "";
-
-    const cosmetics = await fetch7TVUserCosmetics(kickUserId, username);
-
-    const badgesHTML = generateBadges(m, cosmetics);
-    const namePaint = generateNamePaint(m, cosmetics);
-    const paintName = cosmetics?.paint?.name || "";
-    const badgeNames = cosmetics?.badges?.map(b => b.name || b.tooltip).filter(Boolean).join(", ") || "";
-    const cosmeticsTitle = [paintName && `7TV paint: ${paintName}`, badgeNames && `7TV badge: ${badgeNames}`].filter(Boolean).join(" | ");
     const content = processEmotes(m.content);
 
+    // Insertar el mensaje de inmediato con el color de Kick (sin esperar 7TV)
+    // para evitar race conditions de orden cuando llegan mensajes simultáneos
+    const baseColor = getKickUsernameColor(m);
     const msg = document.createElement("div");
     msg.className = "msg";
+    msg.dataset.msgId = m.id;
+    if (kickUserId) msg.dataset.kickUserId = String(kickUserId);
+    // Guardar badges de Kick en el elemento para que re-renders posteriores no los pierdan
+    const kickIdentityBadges = m.identity?.badges || m.sender?.identity?.badges || [];
+    if (kickIdentityBadges.length) {
+      msg.dataset.kickBadges = JSON.stringify(kickIdentityBadges);
+    }
     msg.innerHTML = `
       <span class="meta">
-        <span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-overlay="${namePaint.hasOverlay ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span>
+        <span class="user"><span class="username-text" data-username="${escapeHTML(username)}" data-7tv-overlay="false" data-7tv-paint="" style="--kick-name-color: ${baseColor}; color: ${baseColor};">${escapeHTML(username)}</span></span>
       </span>
       <span class="text">${content}</span>
     `;
-
     chatDiv.appendChild(msg);
     chatDiv.scrollTop = chatDiv.scrollHeight;
+
+    // Aplicar cosméticos si ya están en caché
+    const cachedCosmetics = seventvUserCache[kickUserId] || seventvUserCache[username?.toLowerCase()];
+    if (cachedCosmetics) {
+      applyCosmetics(msg, m, username, kickUserId, cachedCosmetics);
+    } else if (kickUserId && seventvUserCache[kickUserId] === undefined) {
+      // Primera vez que este usuario escribe — fetch en background, aplicar cuando llegue
+      fetch7TVUserCosmetics(kickUserId, username).then(cosmetics => {
+        if (!cosmetics?.paint && !cosmetics?.badges?.length) return;
+        // Aplicar a todos los mensajes de este usuario que estén en el DOM
+        document.querySelectorAll(`.msg[data-kick-user-id="${kickUserId}"]`).forEach(msgEl => {
+          const uname = msgEl.querySelector(".username-text")?.dataset?.username || username;
+          const storedKickBadges = msgEl.dataset.kickBadges ? JSON.parse(msgEl.dataset.kickBadges) : [];
+          const fakeM = { sender: { username: uname, id: kickUserId }, identity: { badges: storedKickBadges } };
+          applyCosmetics(msgEl, fakeM, uname, kickUserId, cosmetics);
+        });
+      }).catch(() => {});
+    }
+  }
+
+  // Aplica badges y paint a un elemento de mensaje ya en el DOM
+  function applyCosmetics(msgEl, m, username, kickUserId, cosmetics) {
+    const userSpan = msgEl.querySelector(".user");
+    if (!userSpan) return;
+    // Recuperar badges de Kick guardados en el elemento si el objeto m no los tiene
+    const storedBadges = msgEl.dataset.kickBadges ? JSON.parse(msgEl.dataset.kickBadges) : [];
+    const mWithBadges = (m.identity?.badges?.length || m.sender?.identity?.badges?.length)
+      ? m
+      : { ...m, identity: { ...(m.identity || {}), badges: storedBadges } };
+    const badgesHTML = generateBadges(mWithBadges, cosmetics);
+    const namePaint  = generateNamePaint(m, cosmetics);
+    const paintName  = cosmetics?.paint?.name || "";
+    const badgeNames = cosmetics?.badges?.map(b => b.name || b.tooltip).filter(Boolean).join(", ") || "";
+    const cosmeticsTitle = [paintName && `7TV paint: ${paintName}`, badgeNames && `7TV badge: ${badgeNames}`].filter(Boolean).join(" | ");
+    userSpan.innerHTML = `${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-overlay="${namePaint.hasOverlay ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span>`;
   }
 
   async function getChannelId(channelSlug) {
     statusMsg.textContent = "Obteniendo canal...";
     statusMsg.style.color = "#53fc18";
-    try {
-      const data = await smartFetch(`https://kick.com/api/v1/channels/${channelSlug}`);
-      return {
-        channelId: data.id,
-        chatroomId: data.chatroom?.id,
-        isLive: !!data.livestream?.id
-      };
-    } catch (err) {
-      statusMsg.textContent = "Error: " + err.message;
-      statusMsg.style.color = "#ff4444";
-      throw err;
+
+    // Intentar v2 primero, luego v1 como fallback
+    const endpoints = [
+      `https://kick.com/api/v2/channels/${channelSlug}`,
+      `https://kick.com/api/v1/channels/${channelSlug}`,
+    ];
+
+    let lastErr = null;
+    for (const url of endpoints) {
+      try {
+        const data = await smartFetch(url);
+        // v2 puede devolver {data: {...}} o directo
+        const ch = data?.data || data;
+        const channelId = ch?.id ?? ch?.channel_id ?? ch?.channelId;
+        const chatroomId = ch?.chatroom?.id ?? ch?.chatroom_id;
+        // user_id es distinto a id — 7TV usa user_id para identificar al streamer en Kick
+        const userId = ch?.user_id ?? ch?.userId ?? ch?.user?.id ?? channelId;
+        if (!channelId) throw new Error("ID de canal no encontrado en respuesta");
+        return {
+          channelId,
+          userId,
+          chatroomId,
+          isLive: !!(ch?.livestream?.id ?? ch?.is_live ?? ch?.live)
+        };
+      } catch (err) {
+        lastErr = err;
+        console.warn(`getChannelId fallo con ${url}:`, err.message);
+      }
     }
+
+    statusMsg.textContent = "Error: " + lastErr.message;
+    statusMsg.style.color = "#ff4444";
+    throw lastErr;
   }
 
   async function loadChat() {
@@ -1220,12 +1558,13 @@
     try {
       const result = await getChannelId(channelName);
       CHANNEL_ID = result.channelId;
+      USER_ID = result.userId;
       CHATROOM_ID = result.chatroomId;
       currentChannel = channelName;
       CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
 
       await loadChannelSubBadges(channelName);
-      await loadAllThirdPartyData(channelName);
+      await loadAllThirdPartyData(channelName, USER_ID);
 
       const isDirectLink = getUrlParams() !== null;
       if (isDirectLink) {
@@ -1246,9 +1585,219 @@
 
       connectWebSocket();
       fetchInitialMessages();
+      connect7TVEventAPI();  // cosméticos y emotes en tiempo real
     } catch (err) {
       console.error(err);
     }
+  }
+
+
+  // ============ 7TV EVENT API (cosméticos y emotes en tiempo real) ============
+
+  function connect7TVEventAPI() {
+    if (seventvEventSource) {
+      seventvEventSource.close();
+      seventvEventSource = null;
+    }
+    if (!USER_ID) return;
+
+    // Construir topics: entitlements + cosméticos del canal, y emote set si está disponible
+    const topics = [
+      `entitlement.*<ctx=channel;platform=KICK;id=${USER_ID}>`,
+      `cosmetic.*<ctx=channel;platform=KICK;id=${USER_ID}>`
+    ];
+    if (seventvEmoteSetId) {
+      topics.push(`emote_set.*<object_id=${seventvEmoteSetId}>`);
+    }
+
+    const url = `https://events.7tv.io/v3@${topics.map(encodeURIComponent).join(",")}`;
+    console.log("7TV EventAPI conectando:", url);
+
+    const es = new EventSource(url);
+    seventvEventSource = es;
+
+    es.addEventListener("open", () => {
+      console.log("7TV EventAPI conectado");
+    });
+
+    // Evento principal de 7TV: llega como "dispatch"
+    es.addEventListener("dispatch", (e) => {
+      try {
+        handle7TVEvent(JSON.parse(e.data));
+      } catch (err) {
+        console.warn("7TV EventAPI parse error:", err);
+      }
+    });
+
+    // También puede llegar sin nombre de evento (message genérico)
+    es.onmessage = (e) => {
+      try {
+        const parsed = JSON.parse(e.data);
+        if (parsed.type || parsed.t) handle7TVEvent(parsed);
+      } catch {}
+    };
+
+    es.onerror = () => {
+      console.warn("7TV EventAPI desconectado, reconectando en 5s...");
+      es.close();
+      seventvEventSource = null;
+      setTimeout(() => {
+        // Solo reconectar si seguimos en el mismo canal
+        if (USER_ID) connect7TVEventAPI();
+      }, 5000);
+    };
+  }
+
+  function handle7TVEvent(payload) {
+    // 7TV EventAPI v3: { type: "emote_set.update", body: { id, pushed, pulled, updated } }
+    // También puede llegar como { t, d } en algunas versiones
+    const type  = (payload.type || payload.t || "").toLowerCase();
+    const body  = payload.body ?? payload.d ?? {};
+    // El body a veces ES el payload si ya viene aplanado
+    const data  = (body && typeof body === "object" && Object.keys(body).length) ? body : payload;
+
+
+    if (type.startsWith("emote_set.")) {
+      // Solo procesar el set del canal del streamer; ignorar sets personales de espectadores
+      const setId = data?.id || data?.object?.id;
+      if (!seventvEmoteSetId || setId === seventvEmoteSetId) {
+        handle7TVEmoteSetEvent(type, data);
+      } else {
+      }
+    } else if (type.startsWith("entitlement.") || type.startsWith("cosmetic.")) {
+      handle7TVEntitlementEvent(type, data);
+    }
+  }
+
+  function handle7TVEmoteSetEvent(topic, data) {
+    const pushed = data?.pushed || [];
+    const pulled  = data?.pulled  || [];
+    const updated = data?.updated || [];
+
+    // Agregar emotes nuevos
+    pushed.forEach(item => {
+      const e = item?.value || item;
+      const host = e?.data?.host;
+      if (!host) return;
+      const file = host.files?.find(f => f.format === "WEBP") || host.files?.[0];
+      if (file && e.name) {
+        emotesData.seventv.community[e.name] = {
+          url: `https:${host.url}/${file.name}`,
+          url2x: `https:${host.url}/${host.files[1]?.name || file.name}`
+        };
+      }
+    });
+
+    // Quitar emotes eliminados
+    pulled.forEach(item => {
+      const name = item?.old_value?.name || item?.value?.name || item?.name;
+      if (name && emotesData.seventv.community[name]) {
+        delete emotesData.seventv.community[name];
+      }
+    });
+
+    // Emotes renombrados: actualizar clave
+    updated.forEach(item => {
+      const oldName = item?.old_value?.name;
+      const newName = item?.value?.name;
+      if (oldName && newName && oldName !== newName) {
+        const existing = emotesData.seventv.community[oldName];
+        if (existing) {
+          emotesData.seventv.community[newName] = existing;
+          delete emotesData.seventv.community[oldName];
+        }
+      }
+    });
+  }
+
+  function handle7TVEntitlementEvent(topic, data) {
+    // Estructura real del EventAPI v3:
+    // entitlement.create { id, kind, object: { id, kind, user: { id, connections: [{platform, id, username}] }, ref_id } }
+    // kind 5 = PAINT, kind 10 = BADGE
+    const obj = data?.object || data;
+    const user7tv = obj?.user || obj?.ref?.user || null;
+
+    // Extraer conexión de Kick del usuario afectado
+    const connections = user7tv?.connections || [];
+    const kickConn = connections.find(c =>
+      (c.platform || "").toUpperCase() === "KICK"
+    );
+    const kickUserId = kickConn?.id || kickConn?.platform_id || null;
+    const username   = kickConn?.username || kickConn?.platform_username || "";
+
+    if (!kickUserId) {
+      return;
+    }
+
+    const cacheKey = String(kickUserId);
+    const kind = data?.kind ?? obj?.kind;
+
+    // Extraer el paint/badge directamente del evento — no necesitamos re-fetchear
+    // El ref_id apunta al cosmético; si viene el objeto completo, usarlo directo
+    const cosmeticRef = obj?.ref_id || null;
+
+    // Debounce: si ya hay un fetch pendiente para este usuario en los últimos 3s, cancelar el anterior
+    if (seventvEntitlementDebounce[cacheKey]) {
+      clearTimeout(seventvEntitlementDebounce[cacheKey]);
+    }
+
+    seventvEntitlementDebounce[cacheKey] = setTimeout(() => {
+      delete seventvEntitlementDebounce[cacheKey];
+
+    // Invalidar caché de este usuario
+    delete seventvUserCache[cacheKey];
+    delete seventvUserCachePromises[cacheKey];
+
+    // Re-fetch cosméticos con GraphQL (ahora tenemos kickUserId y username exactos)
+    fetch7TVUserCosmetics(cacheKey, username).then(cosmetics => {
+      // Si GraphQL no devolvió paint pero el evento trae ref_id, construir desde el evento
+      // (pasa cuando v3/users/kick/{id} da 404 para ese usuario)
+      if (cosmeticRef && kind === 5 && (!cosmetics?.paint)) {
+        if (!cosmetics) cosmetics = { paint: null, badges: [] };
+        cosmetics.paint = { id: cosmeticRef };
+      }
+      if (cosmeticRef && kind === 10 && (!cosmetics?.badges?.length)) {
+        if (!cosmetics) cosmetics = { paint: null, badges: [] };
+        if (!cosmetics.badges.some(b => b.id === cosmeticRef)) {
+          cosmetics.badges = [{ id: cosmeticRef }];
+        }
+      }
+      if (!cosmetics) return;
+
+      // Enriquecer el paint con datos v3 globales si es necesario
+      const enrichAndRender = (cos) => {
+        // Re-renderizar todos los mensajes visibles de este usuario en el DOM
+        // Buscar mensajes del usuario por kickUserId (más preciso) o username como fallback
+      const selector = kickUserId
+        ? `.msg[data-kick-user-id="${kickUserId}"]`
+        : `.msg[data-msg-id]`;
+      document.querySelectorAll(selector).forEach(msgEl => {
+          const userSpan = msgEl.querySelector(".username-text");
+          if (!userSpan) return;
+          const uname = userSpan.dataset.username || "";
+          if (!uname) return;
+          // Si buscamos por username (fallback), filtrar manualmente
+          if (!kickUserId && uname.toLowerCase() !== username.toLowerCase()) return;
+          // Recuperar badges de Kick del dataset del elemento
+          const storedKickBadges = msgEl.dataset.kickBadges ? JSON.parse(msgEl.dataset.kickBadges) : [];
+          const fakeM = { sender: { username: uname, id: kickUserId || cacheKey }, identity: { badges: storedKickBadges } };
+          applyCosmetics(msgEl, fakeM, uname, kickUserId || cacheKey, cos);
+        });
+      };
+
+      if (cosmetics.paint?.id && !cosmetics.paint?.data?.layers?.length && !cosmetics.paint?.gradients?.length) {
+        enrich7TVPaintFromGlobal(cosmetics.paint).then(enriched => {
+          cosmetics.paint = enriched;
+          seventvUserCache[cacheKey] = cosmetics;
+          enrichAndRender(cosmetics);
+        });
+      } else {
+        seventvUserCache[cacheKey] = cosmetics;
+        enrichAndRender(cosmetics);
+      }
+    }).catch(() => {});
+
+    }, 3000); // esperar 3s antes de hacer el fetch, por si llegan más eventos del mismo usuario
   }
 
   function connectWebSocket() {
@@ -1267,12 +1816,15 @@
         const parsed = JSON.parse(event.data);
         if (parsed.event === "App\\Events\\ChatMessageEvent") {
           const data = JSON.parse(parsed.data);
-          addMessage({
-            id: data.id,
-            content: data.content,
-            sender: data.sender,
-            identity: data.sender.identity
-          });
+          // Normalizar: asegurar sender.username (Pusher a veces trae slug en vez de username)
+          if (data.sender && !data.sender.username && data.sender.slug) {
+            data.sender.username = data.sender.slug;
+          }
+          // Propagar identity al nivel raíz para que getKickUsernameColor lo encuentre
+          if (data.sender?.identity && !data.identity) {
+            data.identity = data.sender.identity;
+          }
+          addMessage(data);
         }
       } catch {}
     });
@@ -1284,44 +1836,58 @@
 async function fetchInitialMessages() {
   if (!CHAT_URL) return;
 
-  let url = CHAT_URL;
-  let loaded = 0;
-  const MAX_PAGES = 3;      // intenta hasta 3 páginas (ajusta según rate-limit)
-  const MESSAGES_PER_PAGE = 100; // suposición
+  try {
+    const data = await raceFetch(CHAT_URL);
+    const msgs = data?.data?.messages || data?.messages || [];
+    let loaded = 0;
 
-  for (let page = 0; page < MAX_PAGES; page++) {
-    try {
-      const data = await raceFetch(url);
-      const msgs = data?.data?.messages || data?.messages || [];
-
-      if (!msgs.length) break;
-
+    if (msgs.length) {
       msgs.reverse().forEach(m => {
         if (!messageIds.has(m.id)) {
           addMessage(m);
           loaded++;
         }
       });
+      console.log(`Cargados ${loaded} mensajes iniciales`);
+      statusMsg.textContent += ` | ${loaded} mensajes históricos`;
 
-      // Intento de paginación (cambia según lo que veas en Network tab)
-      // Ejemplos probados por gente: ?before={last_id}  o  ?cursor={next_cursor}
-      const lastMsg = msgs[msgs.length - 1];
-      if (!lastMsg?.id) break;
+      // Pre-cargar cosméticos de los usuarios únicos del historial en paralelo,
+      // luego aplicarlos a sus mensajes ya en el DOM
+      const uniqueUsers = [];
+      const seen = new Set();
+      msgs.forEach(m => {
+        const id = String(m.sender?.id || "");
+        const username = m.sender?.username || m.sender?.slug || "";
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          uniqueUsers.push({ id, username });
+        }
+      });
 
-      url = `${CHAT_URL}?before=${lastMsg.id}`;  // ← prueba este parámetro primero
-      // Alternativas a probar si no funciona:
-      // url = `${CHAT_URL}?cursor=${lastMsg.id}`;
-      // url = `${CHAT_URL}?limit=100&before_id=${lastMsg.id}`;
-
-      await new Promise(r => setTimeout(r, 800)); // delay anti-rate-limit
-    } catch (e) {
-      console.warn("Error en página de historial", page, e);
-      break;
+      // Fetch en paralelo, máx 3 a la vez para no saturar — limitado a 20 usuarios únicos
+      const CHUNK = 3;
+      const usersToFetch = uniqueUsers.slice(0, 20);
+      for (let i = 0; i < usersToFetch.length; i += CHUNK) {
+        await Promise.allSettled(
+          usersToFetch.slice(i, i + CHUNK).map(({ id, username }) =>
+            fetch7TVUserCosmetics(id, username).then(cosmetics => {
+              if (!cosmetics?.paint && !cosmetics?.badges?.length) return;
+              // Aplicar a todos los mensajes de ese usuario ya en el DOM
+              document.querySelectorAll(`.msg[data-kick-user-id="${id}"]`).forEach(msgEl => {
+                const uname = msgEl.querySelector(".username-text")?.dataset?.username || username;
+                const storedKickBadges = msgEl.dataset.kickBadges ? JSON.parse(msgEl.dataset.kickBadges) : [];
+                const fakeM = { sender: { username: uname, id }, identity: { badges: storedKickBadges } };
+                applyCosmetics(msgEl, fakeM, uname, id, cosmetics);
+              });
+            })
+          )
+        );
+      }
     }
+  } catch (e) {
+    // La API de mensajes puede requerir auth — no es crítico, el WebSocket funciona igual
+    console.warn("Historial no disponible:", e.message);
   }
-
-  console.log(`Cargados ${loaded} mensajes iniciales`);
-  statusMsg.textContent += ` | ${loaded} mensajes históricos cargados`;
 }
 
   // Eventos
