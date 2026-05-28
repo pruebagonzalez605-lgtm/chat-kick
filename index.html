@@ -1265,7 +1265,8 @@
     .forEach(([code, emote]) => {
       const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       result = result.replace(
-        new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g'),
+        // No reemplazar dentro de URLs ni tras @ (menciones)
+        new RegExp(`(?<!<[^>]*>)(?<![\\w./@:])\\b${escaped}\\b(?![\\w./])(?![^<]*>)`, 'g'),
         `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" class="emote-third" alt="${code}" title="${code}" onerror="this.style.display='none'">`
       );
     });
