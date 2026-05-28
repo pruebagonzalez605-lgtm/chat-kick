@@ -74,8 +74,10 @@
       opacity: 0;
       transform: translateY(5px);
       animation: fadeUp 0.3s ease forwards;
-      line-height: 30px;
-      display: block;
+      line-height: 36px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
       word-wrap: break-word;
     }
 
@@ -141,10 +143,13 @@
       color: var(--text);
       line-height: 1.4;
       word-wrap: break-word;
+      word-break: break-word;
       font-size: 1em;
       background: transparent;
       display: inline;
       margin-left: 5px;
+      flex: 1 1 0;
+      min-width: 0;
     }
 
     /* ===================== EMOTES ===================== */
@@ -257,7 +262,8 @@
     "og": "assets/og.png",
     "subscriber": "assets/subscriber.png",
     "sub_gifter": "assets/sub_gifter.png",
-    "founder": "assets/founder.png"
+    "founder": "assets/founder.png",
+    "staff": "assets/staff.png"
   };
 
   const KICK_USERNAME_COLORS = [
@@ -311,7 +317,7 @@
 
   async function fetchDirect(url, timeout = 5000) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const timeoutId = setTimeout(() => controller.abort("timeout"), timeout);
     try {
       const res = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }, signal: controller.signal, cache: 'no-store' });
       clearTimeout(timeoutId);
@@ -324,7 +330,7 @@
 
   async function fetchWithProxy(url, timeout = 5000) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const timeoutId = setTimeout(() => controller.abort("timeout"), timeout);
     try {
       const proxyUrl = CORS_PROXY + encodeURIComponent(url);
       const res = await fetch(proxyUrl, { signal: controller.signal, cache: 'no-store' });
@@ -393,7 +399,6 @@
         statusMsg.textContent += " | No sub-badges personalizados";
       }
     } catch (err) {
-      console.error("Error sub-badges:", err);
       statusMsg.textContent += " | Error al cargar sub-badges";
     }
   }
@@ -496,12 +501,13 @@
       if (value.hex) return to7TVColor(value.hex, fallback);
     }
     if (typeof value === "number") {
-      // 7TV empaqueta colores como int32 con signo en formato ARGB (A=bits 31-24, R=23-16, G=15-8, B=7-0)
+      // 7TV empaqueta colores como int32 con signo en formato RGBA
+      // (R=bits 31-24, G=23-16, B=15-8, A=7-0), igual que DecimalToStringRGBA de la extensión oficial.
       const u = value >>> 0;
-      const a = ((u >>> 24) & 0xff) / 255;
-      const r = (u >>> 16) & 0xff;
-      const g = (u >>> 8)  & 0xff;
-      const b =  u         & 0xff;
+      const r = (u >>> 24) & 0xff;
+      const g = (u >>> 16) & 0xff;
+      const b = (u >>> 8)  & 0xff;
+      const a = (u & 0xff) / 255;
       if (a >= 0.99) return `rgb(${r}, ${g}, ${b})`;
       if (a <= 0.01) return fallback;   // alpha=0 → sin color definido, usar fallback
       return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
@@ -661,26 +667,46 @@
     return "";
   }
 
-  // Genera src + srcset para badges de 7TV (usa images[] de v4 o host/files de v3)
+  // Genera src + srcset para badges de 7TV.
+  // Los badges usan el patron: https://cdn.7tv.app/badge/{id}/{scale}x.webp (sin _static).
   function get7TVBadgeSrcSet(asset) {
-    const src = get7TVAssetUrl(asset, true);
-    if (!src) return { src: "", srcset: "" };
+    const badgeId = asset?.id || asset?.data?.id;
 
+    // Ruta prioritaria: construir URL desde el ID del badge directamente (igual que hace 7TV)
+    if (badgeId) {
+      const base = `https://cdn.7tv.app/badge/${badgeId}`;
+      const src = `${base}/1x.webp`;
+      const srcset = `${base}/1x.webp 1x, ${base}/2x.webp 2x, ${base}/3x.webp 3x, ${base}/4x.webp 4x`;
+      return { src, srcset };
+    }
+
+    // Fallback: images[] de v4 — filtrar _static para usar la version animada
     const imgs = asset?.images || [];
-    if (imgs.length >= 2) {
-      const webpImgs = imgs.filter(img => img.mime === "image/webp").sort((a, b) => a.scale - b.scale);
-      if (webpImgs.length >= 2) {
+    if (imgs.length) {
+      const webpImgs = imgs
+        .filter(img => img.mime === "image/webp" && !img.url?.includes("_static"))
+        .sort((a, b) => a.scale - b.scale);
+      if (webpImgs.length) {
+        const src = normalize7TVUrl(webpImgs[0].url);
         const srcset = webpImgs.map(img => `${normalize7TVUrl(img.url)} ${img.scale}x`).join(", ");
+        return { src, srcset };
+      }
+      const allWebp = imgs.filter(img => img.mime === "image/webp").sort((a, b) => a.scale - b.scale);
+      if (allWebp.length) {
+        const src = normalize7TVUrl(allWebp[0].url);
+        const srcset = allWebp.map(img => `${normalize7TVUrl(img.url)} ${img.scale}x`).join(", ");
         return { src, srcset };
       }
     }
 
-    // Fallback v3 host/files
+    // Fallback v3 host/files — filtrar _static
     const host = asset?.host || asset?.data?.host;
     if (host?.url && host?.files?.length) {
-      const webpFiles = host.files.filter(f => f.format === "WEBP");
-      if (webpFiles.length >= 2) {
-        const srcset = webpFiles.map(f => {
+      const webpFiles = host.files.filter(f => f.format === "WEBP" && !f.name?.includes("_static"));
+      const filesToUse = webpFiles.length ? webpFiles : host.files.filter(f => f.format === "WEBP");
+      if (filesToUse.length) {
+        const src = normalize7TVUrl(`${host.url}/${filesToUse[0].name}`);
+        const srcset = filesToUse.map(f => {
           const scale = f.name.match(/^(\d)x/)?.[1] || "1";
           return `${normalize7TVUrl(`${host.url}/${f.name}`)} ${scale}x`;
         }).join(", ");
@@ -688,7 +714,7 @@
       }
     }
 
-    return { src, srcset: "" };
+    return { src: "", srcset: "" };
   }
 
   function get7TVPaintImageUrl(asset) {
@@ -716,6 +742,25 @@
 
     if (paint?.gradients?.length) {
       return paint.gradients.map(gradient => ({ gradient }));
+    }
+
+    // Formato v3/v2 legacy: function/stops/angle/shape/image_url están en el nivel
+    // superior del paint (sin array). Algunos paints solo vienen así y se perdían.
+    if (paint?.function || (Array.isArray(paint?.stops) && paint.stops.length) || paint?.image_url) {
+      return [{
+        gradient: {
+          function: paint.function,
+          stops: paint.stops || [],
+          angle: paint.angle,
+          shape: paint.shape,
+          repeat: paint.repeat,
+          image_url: paint.image_url,
+          canvas_repeat: paint.canvas_repeat,
+          canvas_size: paint.canvas_size,
+          at: paint.at,
+          size: paint.size
+        }
+      }];
     }
 
     return [];
@@ -903,7 +948,6 @@
         };
       }
     } catch (err) {
-      console.warn("7TV global paints failed:", err);
     }
 
     // Si no está en el global, hacer fetch directo por ID (paints de suscripción/privados)
@@ -1076,7 +1120,6 @@
           return cosmetics;
         }
       } catch (err) {
-        console.warn("7TV v4 fallback failed:", username, err);
       }
     }
 
@@ -1187,9 +1230,8 @@
       });
 
       const count = Object.keys(emotesData.seventv.community).length;
-      console.log(`7TV canal: ${count} emotes cargados (set: ${emoteSet.name || emoteSet.id})`);
+      // emotes cargados
     } catch (err) {
-      console.warn("7TV emotes del canal no disponibles:", err.message);
     }
   }
 
@@ -1268,117 +1310,167 @@
     return textShadow ? ` text-shadow: ${textShadow};` : "";
   }
 
+  // Convierte un par [x, y] normalizado (0..1) de 7TV a un string CSS "X% Y%".
+  // Acepta arrays, objetos {x,y} o valores sueltos. Devuelve null si no hay dato.
+  function pairToPercent(value) {
+    if (value == null) return null;
+    let x, y;
+    if (Array.isArray(value)) {
+      if (value.length < 2) return null;
+      x = Number(value[0]); y = Number(value[1]);
+    } else if (typeof value === "object") {
+      x = Number(value.x); y = Number(value.y);
+    } else {
+      return null;
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return `${(x * 100).toFixed(2)}% ${(y * 100).toFixed(2)}%`;
+  }
+
+  // Normaliza el valor canvas_repeat de 7TV ("no-repeat" | "repeat" | "repeat-x" | "repeat-y" | "" )
+  function normalizeCanvasRepeat(value) {
+    const v = String(value || "").toLowerCase().trim();
+    if (["repeat", "repeat-x", "repeat-y", "no-repeat", "round", "space"].includes(v)) return v;
+    return null;
+  }
+
+  // Construye el stack de capas de un paint replicando la extensión oficial de 7TV.
+  // Cada capa produce { image, position, size, repeat } que luego se combinan en
+  // background-image / background-position / background-size / background-repeat.
+  // El orden del array se respeta: la capa 0 queda ARRIBA (igual que en CSS).
   function build7TVPaintBackgroundLayers(paint, base) {
-    const backgroundLayers = [];
-    const solidColors = [];
+    const layers = [];          // { image, position, size, repeat }
+    let hasImageLayer = false;
 
     get7TVPaintLayers(paint).forEach(layer => {
       const ty = layer.ty || layer.image || {};
       const gradient = layer.gradient || layer.linearGradient || layer.radialGradient || ty;
-      // Opacidad por layer (v4 API): 1.0 = totalmente opaco, <1 = semitransparente
+      // Opacidad por capa (v4): 1.0 opaco, <1 semitransparente. Se multiplica al alpha del color.
       const layerOpacity = (layer.opacity != null && layer.opacity >= 0 && layer.opacity <= 1)
         ? layer.opacity : 1;
 
-      // Convierte un color con opacidad de layer multiplicada al alpha del color
       const colorWithOpacity = (colorVal) => {
-        if (layerOpacity >= 1) return to7TVColor(colorVal, base);
         const css = to7TVColor(colorVal, base);
-        if (!css) return css;
-        // Parsear rgba/rgb para inyectar alpha multiplicado
+        if (!css || layerOpacity >= 1) return css;
         const mRgba = css.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
         if (mRgba) {
           const a = (mRgba[4] != null ? parseFloat(mRgba[4]) : 1) * layerOpacity;
           return `rgba(${mRgba[1]}, ${mRgba[2]}, ${mRgba[3]}, ${a.toFixed(3)})`;
         }
-        return css; // fallback si no se puede parsear
+        return css;
       };
 
+      const push = (image, { position = null, size = null, repeat = null } = {}) => {
+        layers.push({ image, position, size, repeat });
+      };
+
+      // ---- Formato v4: capas tipadas (PaintLayerType*) ----
       if (ty.__typename === "PaintLayerTypeSingleColor" && ty.color) {
-        solidColors.push(colorWithOpacity(ty.color));
+        // Un color sólido se renderiza como gradiente de un solo color para
+        // conservar su posición dentro del stack (NO se saca como color: del texto).
+        const c = colorWithOpacity(ty.color);
+        push(`linear-gradient(${c}, ${c})`);
         return;
       }
 
       if ((ty.__typename === "PaintLayerTypeLinearGradient" || ty.__typename === "PaintLayerTypeRadialGradient") && ty.stops?.length) {
         const stops = ty.stops
-          .map(s => `${colorWithOpacity(s.color)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
+          .map(s => `${colorWithOpacity(s.color)} ${(Math.max(0, Math.min(1, Number(s.at || 0))) * 100).toFixed(2)}%`)
           .join(", ");
         if (ty.__typename === "PaintLayerTypeRadialGradient") {
-          const shape = ty.shape || "circle";
-          backgroundLayers.push(ty.repeating
-            ? `repeating-radial-gradient(${shape}, ${stops})`
-            : `radial-gradient(${shape}, ${stops})`);
+          const shape = ty.shape ? String(ty.shape).toLowerCase() : "circle";
+          push(`${ty.repeating ? "repeating-" : ""}radial-gradient(${shape}, ${stops})`);
         } else {
-          // 7TV almacena el ángulo ya en formato CSS (desde norte, sentido horario)
-          const cssAngle = Number(ty.angle ?? 90);
-          backgroundLayers.push(ty.repeating
-            ? `repeating-linear-gradient(${cssAngle}deg, ${stops})`
-            : `linear-gradient(${cssAngle}deg, ${stops})`);
+          // 7TV guarda el ángulo YA en grados CSS (0=arriba, sentido horario). Se usa tal cual.
+          const cssAngle = Number(ty.angle ?? 0);
+          push(`${ty.repeating ? "repeating-" : ""}linear-gradient(${cssAngle}deg, ${stops})`);
         }
         return;
       }
 
-      const imageUrl = get7TVPaintImageUrl(ty) || get7TVPaintImageUrl(layer);
-      if (imageUrl) {
-        backgroundLayers.push(`url("${imageUrl}")`);
+      // Capa imagen v4
+      const v4ImageUrl = (ty.__typename === "PaintLayerTypeImage")
+        ? (get7TVPaintImageUrl(ty) || get7TVPaintImageUrl(layer))
+        : "";
+      if (v4ImageUrl) {
+        hasImageLayer = true;
+        push(`url("${v4ImageUrl}")`, { size: "contain", repeat: "no-repeat" });
         return;
       }
 
+      // ---- Formato v3/v2: objeto gradient con function/stops/at/canvas_size ----
       const gradientFunction = String(gradient.function || "").toUpperCase();
       const gradientImageUrl = normalize7TVUrl(gradient.image_url || "");
       if (gradientImageUrl && gradientFunction.includes("URL")) {
-        backgroundLayers.push(`url("${gradientImageUrl}")`);
+        hasImageLayer = true;
+        push(`url("${gradientImageUrl}")`, { size: "contain", repeat: "no-repeat" });
         return;
       }
 
       const stops = (gradient.stops || [])
         .map(s => {
-          const color = to7TVColor(s.color, base);
+          const color = colorWithOpacity(s.color);
           const rawAt = Number(s.at ?? 0);
           const at = Math.max(0, Math.min(1, rawAt > 1 ? rawAt / 100 : rawAt));
-          return `${color} ${at * 100}%`;
+          return `${color} ${(at * 100).toFixed(2)}%`;
         })
         .join(", ");
 
-      if (stops) {
-        // canvas_repeat + canvas_size de v3: el gradiente se repite en un tile de tamaño canvas_size
-        // Si canvas_size es 0.5 → background-size: 50% auto; background-repeat: repeat
-        const canvasRepeat = gradient.canvas_repeat ?? false;
-        const canvasSize   = Number(gradient.canvas_size || 0);
-        let bgSizeOverride = null;
-        if (canvasRepeat && canvasSize > 0) {
-          const pct = Math.round(canvasSize * 100);
-          bgSizeOverride = `${pct}%`;
-        }
+      if (!stops) return;
 
-        if (gradientFunction.includes("RADIAL")) {
-          backgroundLayers.push(gradient.repeat
-            ? `repeating-radial-gradient(${gradient.shape || "circle"}, ${stops})`
-            : `radial-gradient(${gradient.shape || "circle"}, ${stops})`);
-        } else {
-          // 7TV v3: ángulo matemático (0=derecha, CCW) → convertir a CSS bearing (0=arriba, CW)
-          const cssAngle3 = 90 - Number(gradient.angle ?? 0);
-          backgroundLayers.push(gradient.repeat
-            ? `repeating-linear-gradient(${cssAngle3}deg, ${stops})`
-            : `linear-gradient(${cssAngle3}deg, ${stops})`);
-        }
+      // Posición (at) y tamaño (size/canvas_size) por capa — clave para paints complejos.
+      const position = pairToPercent(gradient.at);
+      const size = pairToPercent(gradient.size) || pairToPercent(gradient.canvas_size);
+      const repeat = normalizeCanvasRepeat(gradient.canvas_repeat);
 
-        // Si hay tile, adjuntar el override de tamaño como metadata para usarlo en CSS
-        if (bgSizeOverride) {
-          backgroundLayers._canvasSizeOverride = bgSizeOverride;
-        }
+      let image;
+      if (gradientFunction.includes("RADIAL")) {
+        const shape = gradient.shape ? String(gradient.shape).toLowerCase() : "circle";
+        image = `${gradient.repeat ? "repeating-" : ""}radial-gradient(${shape}, ${stops})`;
+      } else {
+        // v3 también guarda el ángulo en grados CSS — usar directamente (sin "90 - angle").
+        const cssAngle = Number(gradient.angle ?? 0);
+        image = `${gradient.repeat ? "repeating-" : ""}linear-gradient(${cssAngle}deg, ${stops})`;
       }
+      push(image, { position, size, repeat });
     });
 
     return {
-      backgroundLayers,
-      solidColor: solidColors.find(Boolean) || to7TVColor(paint?.color, null)
+      layers,
+      hasImageLayer,
+      // color: solo como fallback (texto plano si el clip falla). 7TV usa paint.data.color.
+      solidColor: to7TVColor(paint?.color, null)
     };
   }
+
+  // Overrides manuales para paints que la API no devuelve correctamente.
+  // Clave: paint ID de 7TV. Valor: CSS a inyectar directamente.
+  const SEVENTV_PAINT_OVERRIDES = {
+    // Scorched — repeating-linear-gradient a 135° con colores de fuego/quemado
+    "01JWHCF4H5QQVNXGXWZBNGM9QT": (base) =>
+      `background-image: repeating-linear-gradient(135deg, rgb(188, 21, 54) 0%, rgb(247, 29, 18) 12%, rgb(255, 131, 12) 12%, rgb(247, 29, 18) 23%, rgb(255, 131, 12) 23%, rgb(255, 131, 12) 33%);` +
+      ` background-position: center; background-size: 100% 100%; background-repeat: no-repeat;` +
+      ` -webkit-background-clip: text; background-clip: text;` +
+      ` -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;` +
+      ` filter: drop-shadow(rgb(204, 31, 0) 0px 0px 0.1px); color: ${base};`
+  };
 
   function ensure7TVPaintClass(paint, base) {
     if (!paint?.id) return "";
 
     const className = get7TVPaintClassName(paint.id);
+
+    // Override manual: algunos paints no se reciben bien de la API — usar CSS directo
+    if (SEVENTV_PAINT_OVERRIDES[paint.id]) {
+      if (!injected7TVPaintClasses.has(className)) {
+        const overrideCSS = SEVENTV_PAINT_OVERRIDES[paint.id](base);
+        get7TVPaintStyleSheet().appendChild(document.createTextNode(`.${className}{${overrideCSS}}\n`));
+        injected7TVPaintClasses.add(className);
+        injected7TVPaintOverlays[className] = false;
+        injected7TVPaintHasLayers[className] = true;
+      }
+      return { className, hasOverlay: false };
+    }
 
     // Verificar si el paint tiene capas reales; si ya está cacheado con datos buenos, reutilizar
     const hasRealLayers = (paint?.data?.layers?.length > 0) || (paint?.gradients?.length > 0) || (paint?.color != null);
@@ -1388,34 +1480,55 @@
       if (cachedHasLayers || !hasRealLayers) {
         return { className, hasOverlay: !!injected7TVPaintOverlays[className] };
       }
-      // Tiene nuevos datos — eliminar clase antigua y reinyectar
+      // Tiene nuevos datos — eliminar regla CSS antigua del stylesheet antes de reinyectar
+      const styleEl = get7TVPaintStyleSheet();
+      for (let i = styleEl.childNodes.length - 1; i >= 0; i--) {
+        if (styleEl.childNodes[i].textContent?.includes(`.${className}{`)) {
+          styleEl.removeChild(styleEl.childNodes[i]);
+        }
+      }
       injected7TVPaintClasses.delete(className);
+      delete injected7TVPaintOverlays[className];
+      delete injected7TVPaintHasLayers[className];
     }
 
-    const { backgroundLayers, solidColor } = build7TVPaintBackgroundLayers(paint, base);
+    const { layers, hasImageLayer, solidColor } = build7TVPaintBackgroundLayers(paint, base);
     const shadowsData = [
       ...(paint.shadows || []),
       ...(paint.text?.shadows || []),
       ...(!paint.shadows?.length && !paint.text?.shadows?.length ? (paint.data?.shadows || []) : [])
     ];
-    const hasImageLayer = backgroundLayers.some(layer => layer.startsWith("url("));
-    // Las sombras siempre van como filter:drop-shadow() — funciona con background-clip:text
-    // y con url() overlays. text-shadow NO funciona cuando -webkit-text-fill-color:transparent.
+    // Las sombras van como filter:drop-shadow() — funciona con background-clip:text.
+    // text-shadow NO funciona cuando -webkit-text-fill-color:transparent.
     const shadowStyles = build7TVShadowStyles(shadowsData);
     const color = solidColor || "var(--kick-name-color)";
 
-    // background-size: cover para gradientes → el patrón se escala al contenedor completo
-    // en vez de estirarse letra a letra (100% 100%), igual que hace la extensión oficial.
-    // Si hay canvas_repeat con canvas_size → usar ese tamaño para tiling.
-    const bgSize = backgroundLayers._canvasSizeOverride
-      ? `${backgroundLayers._canvasSizeOverride} auto`
-      : "cover";
-    const bgRepeat = backgroundLayers._canvasSizeOverride ? "background-repeat: repeat;" : "";
-    const declarations = hasImageLayer
-      ? `color: ${color}; --seventv-paint-bg: ${backgroundLayers.join(", ")}; --seventv-paint-opacity: 1.0;${shadowStyles}`
-      : backgroundLayers.length
-        ? `color: ${color}; background-image: ${backgroundLayers.join(", ")}; background-color: currentColor; background-size: ${bgSize}; background-position: center; ${bgRepeat}-webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;${shadowStyles}`
-        : `color: ${color};${shadowStyles}`;
+    // Imagen (paint animado) → se mantiene la ruta de overlay ::after existente.
+    // El overlay usa el stack completo de imágenes.
+    const imageStack = layers.map(l => l.image).join(", ");
+
+    let declarations;
+    if (hasImageLayer) {
+      declarations = `color: ${color}; --seventv-paint-bg: ${imageStack}; --seventv-paint-opacity: 1.0;${shadowStyles}`;
+    } else if (layers.length) {
+      // Cada propiedad se compone por capa, replicando a la extensión oficial de 7TV.
+      // Si una capa no define posición/tamaño/repeat usamos valores que cubren todo el texto.
+      const bgImage    = layers.map(l => l.image).join(", ");
+      const bgPosition = layers.map(l => l.position || "center").join(", ");
+      const bgSize     = layers.map(l => l.size || "100% 100%").join(", ");
+      const bgRepeat   = layers.map(l => l.repeat || "no-repeat").join(", ");
+      declarations =
+        `color: ${color};` +
+        ` background-image: ${bgImage};` +
+        ` background-position: ${bgPosition};` +
+        ` background-size: ${bgSize};` +
+        ` background-repeat: ${bgRepeat};` +
+        ` -webkit-background-clip: text; background-clip: text;` +
+        ` -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;` +
+        shadowStyles;
+    } else {
+      declarations = `color: ${color};${shadowStyles}`;
+    }
 
     get7TVPaintStyleSheet().appendChild(document.createTextNode(`.${className}{${declarations}}\n`));
     injected7TVPaintClasses.add(className);
@@ -1461,12 +1574,12 @@
     if (kickUserId) msg.dataset.kickUserId = String(kickUserId);
     // Guardar badges de Kick en el elemento para que re-renders posteriores no los pierdan
     const kickIdentityBadges = m.identity?.badges || m.sender?.identity?.badges || [];
-    if (kickIdentityBadges.length) {
-      msg.dataset.kickBadges = JSON.stringify(kickIdentityBadges);
-    }
+    msg.dataset.kickBadges = JSON.stringify(kickIdentityBadges);
+    // Renderizar badges de Kick inmediatamente (no esperamos a 7TV)
+    const initialBadgesHTML = generateBadges(m, null);
     msg.innerHTML = `
       <span class="meta">
-        <span class="user"><span class="username-text" data-username="${escapeHTML(username)}" data-7tv-overlay="false" data-7tv-paint="" style="--kick-name-color: ${baseColor}; color: ${baseColor};">${escapeHTML(username)}</span></span>
+        <span class="user">${initialBadgesHTML}<span class="username-text" data-username="${escapeHTML(username)}" data-7tv-overlay="false" data-7tv-paint="" style="--kick-name-color: ${baseColor}; color: ${baseColor};">${escapeHTML(username)}</span></span>
       </span>
       <span class="text">${content}</span>
     `;
@@ -1477,7 +1590,7 @@
     const cachedCosmetics = seventvUserCache[kickUserId] || seventvUserCache[username?.toLowerCase()];
     if (cachedCosmetics) {
       applyCosmetics(msg, m, username, kickUserId, cachedCosmetics);
-    } else if (kickUserId && seventvUserCache[kickUserId] === undefined) {
+    } else if (kickUserId && seventvUserCache[kickUserId] === undefined && !seventvUserCachePromises[kickUserId]) {
       // Primera vez que este usuario escribe — fetch en background, aplicar cuando llegue
       fetch7TVUserCosmetics(kickUserId, username).then(cosmetics => {
         if (!cosmetics?.paint && !cosmetics?.badges?.length) return;
@@ -1538,7 +1651,6 @@
         };
       } catch (err) {
         lastErr = err;
-        console.warn(`getChannelId fallo con ${url}:`, err.message);
       }
     }
 
@@ -1587,7 +1699,6 @@
       fetchInitialMessages();
       connect7TVEventAPI();  // cosméticos y emotes en tiempo real
     } catch (err) {
-      console.error(err);
     }
   }
 
@@ -1611,13 +1722,11 @@
     }
 
     const url = `https://events.7tv.io/v3@${topics.map(encodeURIComponent).join(",")}`;
-    console.log("7TV EventAPI conectando:", url);
 
     const es = new EventSource(url);
     seventvEventSource = es;
 
     es.addEventListener("open", () => {
-      console.log("7TV EventAPI conectado");
     });
 
     // Evento principal de 7TV: llega como "dispatch"
@@ -1625,7 +1734,6 @@
       try {
         handle7TVEvent(JSON.parse(e.data));
       } catch (err) {
-        console.warn("7TV EventAPI parse error:", err);
       }
     });
 
@@ -1638,7 +1746,6 @@
     };
 
     es.onerror = () => {
-      console.warn("7TV EventAPI desconectado, reconectando en 5s...");
       es.close();
       seventvEventSource = null;
       setTimeout(() => {
@@ -1848,7 +1955,6 @@ async function fetchInitialMessages() {
           loaded++;
         }
       });
-      console.log(`Cargados ${loaded} mensajes iniciales`);
       statusMsg.textContent += ` | ${loaded} mensajes históricos`;
 
       // Pre-cargar cosméticos de los usuarios únicos del historial en paralelo,
@@ -1886,7 +1992,6 @@ async function fetchInitialMessages() {
     }
   } catch (e) {
     // La API de mensajes puede requerir auth — no es crítico, el WebSocket funciona igual
-    console.warn("Historial no disponible:", e.message);
   }
 }
 
