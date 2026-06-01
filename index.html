@@ -64,37 +64,51 @@
     #chat::-webkit-scrollbar { width: 0px; }
 
     .msg {
-      margin-bottom: 0.35rem;
+      margin-bottom: 0.3rem;
       padding: 0;
+      border-radius: 0;
       background: transparent;
+      box-shadow: none;
       filter: drop-shadow(2px 2px 0.2rem black);
+      transition: all 0.25s ease;
       opacity: 0;
+      transform: translateY(5px);
       animation: fadeUp 0.3s ease forwards;
-      /* todo el contenido fluye como texto continuo */
-      line-height: 1.5;
-      word-break: break-word;
-      overflow-wrap: anywhere;
+      line-height: 30px;
+      display: block;
+      word-wrap: break-word;
     }
 
     .meta {
-      display: inline;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 0;
+      flex-wrap: nowrap;
     }
 
     .badge-icon {
-      width: 1.1em;
-      height: 1.1em;
+      width: 18px;
+      height: 18px;
       border-radius: 3px;
       object-fit: contain;
       vertical-align: middle;
-      margin-right: 2px;
-      position: relative;
-      top: -1px;
+      margin-right: 3px;
+      margin-bottom: 2px;
+      display: inline-block;
     }
 
     .user {
       font-weight: 800;
       font-size: 1em;
       display: inline;
+      align-items: center;
+      gap: 2px;
+    }
+
+    /* colon via CSS ::after */
+    .user::after {
+      content: ': ';
     }
 
     /* inline-block necesario para que ::after con position:absolute funcione en paints 7TV */
@@ -125,23 +139,14 @@
       pointer-events: none;
     }
 
-    /* colon va en el HTML directamente */
-    .user::after {
-      content: '';
-    }
-
-    .colon {
-      color: var(--text);
-      font-weight: 800;
-      display: inline;
-    }
-
     .text {
       color: var(--text);
+      line-height: 1.4;
+      word-wrap: break-word;
       font-size: 1em;
+      background: transparent;
       display: inline;
-      word-break: break-word;
-      overflow-wrap: anywhere;
+      margin-left: 5px;
     }
 
     /* ===================== EMOTES ===================== */
@@ -221,6 +226,7 @@
   let CHANNEL_ID = null;
   let CHATROOM_ID = null;
   let CHAT_URL = null;
+  let STREAMER_USER_ID = null;
   let currentChannel = null;
   let kickWS = null;
   const chatDiv = document.getElementById("chat");
@@ -261,12 +267,6 @@
     "#facc15", "#22c55e", "#14b8a6", "#06b6d4"
   ];
 
-  const KICK_USERNAME_OVERRIDES = {
-    "collin_0108": "#00aeef",
-    "txc_matheo": "#c65cff",
-    "fabian_rms": "#ff3864"
-  };
-
   const ENABLE_7TV_NAME_PAINTS = new URLSearchParams(window.location.search).get("paints") !== "off";
 
   const KICK_USERNAME_COLOR_NAMES = {
@@ -292,11 +292,7 @@
     teal: "#14b8a6"
   };
 
-  const STREAMER_CUSTOM_7TV_SETS = {
-    "carlogato": ["01HTTD778R000E3Y75DEQDXPKB"],
-    "elshark": ["01KKFNJR4WRG7W82S12R3W1TWW"],
-    "elviejoesteban": ["01JPCFHR3A28YZR5VA53J8W2MJ"],
-  };
+
 
   // ============ FETCH HELPERS ============
   function getUrlParams() {
@@ -531,10 +527,6 @@
     const identity = m.identity || m.sender?.identity || {};
     const sender = m.sender || {};
     const normalizedUsername = sender.username?.toLowerCase();
-
-    if (normalizedUsername && KICK_USERNAME_OVERRIDES[normalizedUsername]) {
-      return KICK_USERNAME_OVERRIDES[normalizedUsername];
-    }
 
     const colorCandidates = [
       identity.color,
@@ -962,31 +954,29 @@
     } catch {}
   }
 
-  async function loadChannelCustom7TVSets(channelSlug) {
-    const setIds = STREAMER_CUSTOM_7TV_SETS[channelSlug?.toLowerCase()] || [];
-    if (!setIds.length) return;
-
-    for (const setId of setIds) {
-      try {
-        const data = await smartFetch(`https://7tv.io/v3/emote-sets/${setId}`);
-        data.emotes?.forEach(e => {
-          const host = e.data.host;
-          const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
-          if (file) {
-            emotesData.seventv.community[e.name] = {
-              url: `https:${host.url}/${file.name}`,
-              url2x: `https:${host.url}/${host.files[1]?.name || file.name}`
-            };
-          }
-        });
-      } catch {}
-    }
+  async function loadChannelCustom7TVSets() {
+    try {
+      // Usa el user_id del streamer en Kick para obtener los emotes del canal en 7TV
+      const data = await smartFetch(`https://7tv.io/v3/users/kick/${STREAMER_USER_ID}`);
+      const emoteSet = data?.emote_set || data?.user?.emote_set;
+      emoteSet?.emotes?.forEach(e => {
+        const host = e.data?.host;
+        if (!host) return;
+        const file = host.files?.find(f => f.format === 'WEBP') || host.files?.[0];
+        if (file) {
+          emotesData.seventv.community[e.name] = {
+            url: `https:${host.url}/${file.name}`,
+            url2x: `https:${host.url}/${host.files[1]?.name || file.name}`
+          };
+        }
+      });
+    } catch {}
   }
 
-  async function loadAllThirdPartyData(channelSlug) {
+  async function loadAllThirdPartyData() {
     statusMsg.textContent = "Cargando emotes...";
     await Promise.all([
-      loadChannelCustom7TVSets(channelSlug),
+      loadChannelCustom7TVSets(),
       loadFFZData(),
       loadBTTVData(),
       load7TVData()
@@ -1178,7 +1168,7 @@
 
     const msg = document.createElement("div");
     msg.className = "msg";
-    msg.innerHTML = `<span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-overlay="${namePaint.hasOverlay ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span><span class="colon">: </span><span class="text">${content}</span>`;
+    msg.innerHTML = `<span class="meta"><span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-overlay="${namePaint.hasOverlay ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span></span><span class="text">${content}</span>`;
 
     chatDiv.appendChild(msg);
     chatDiv.scrollTop = chatDiv.scrollHeight;
@@ -1188,11 +1178,24 @@
     statusMsg.textContent = "Obteniendo canal...";
     statusMsg.style.color = "#53fc18";
     try {
-      const data = await smartFetch(`https://kick.com/api/v1/channels/${channelSlug}`);
+      // Intentamos v2 primero (tiene user_id que necesitamos para 7TV)
+      let data = null;
+      try {
+        data = await smartFetch(`https://kick.com/api/v2/channels/${channelSlug}`);
+      } catch {}
+
+      // Fallback a v1 si v2 falla
+      if (!data?.id) {
+        data = await smartFetch(`https://kick.com/api/v1/channels/${channelSlug}`);
+      }
+
+      const userId = data.user_id || data.user?.id || null;
+
       return {
         channelId: data.id,
         chatroomId: data.chatroom?.id,
-        isLive: !!data.livestream?.id
+        isLive: !!data.livestream?.id,
+        userId
       };
     } catch (err) {
       statusMsg.textContent = "Error: " + err.message;
@@ -1213,11 +1216,12 @@
       const result = await getChannelId(channelName);
       CHANNEL_ID = result.channelId;
       CHATROOM_ID = result.chatroomId;
+      STREAMER_USER_ID = result.userId || result.channelId; // fallback al channelId si no hay userId
       currentChannel = channelName;
       CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
 
       await loadChannelSubBadges(channelName);
-      await loadAllThirdPartyData(channelName);
+      await loadAllThirdPartyData();
 
       const isDirectLink = getUrlParams() !== null;
       if (isDirectLink) {
