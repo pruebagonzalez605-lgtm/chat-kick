@@ -111,32 +111,21 @@
       content: ': ';
     }
 
-    /* inline-block necesario para que ::after con position:absolute funcione en paints 7TV */
     .username-text {
       display: inline-block;
       position: relative;
       line-height: inherit;
       vertical-align: baseline;
-      background-size: 100%;
-      background-repeat: no-repeat;
     }
 
-    .username-text[data-7tv-overlay="true"]::after {
-      content: attr(data-username);
-      position: absolute;
-      inset: 0;
-      color: transparent;
-      background-image: var(--seventv-paint-bg);
-      background-size: cover;
-      background-position: center;
-      background-repeat: repeat;
+    /* Paint aplicado directo al elemento (mismo método que 7database) */
+    .username-text[data-7tv-paint-direct="true"] {
       -webkit-background-clip: text;
       background-clip: text;
       -webkit-text-fill-color: transparent;
-      opacity: var(--seventv-paint-opacity, 0.48);
-      text-shadow: none;
-      filter: none;
-      pointer-events: none;
+      color: transparent;
+      background-size: cover;
+      background-position: center center;
     }
 
     .text {
@@ -229,6 +218,7 @@
   let STREAMER_USER_ID = null;
   let currentChannel = null;
   let kickWS = null;
+  let sevenTVEventSource = null;
   const chatDiv = document.getElementById("chat");
   const inputContainer = document.getElementById("channel-input-container");
   const channelInput = document.getElementById("channel-name-input");
@@ -291,8 +281,6 @@
     yellow: "#facc15",
     teal: "#14b8a6"
   };
-
-
 
   // ============ FETCH HELPERS ============
   function getUrlParams() {
@@ -409,6 +397,33 @@
   }
 
   // ============ GENERATE BADGES ============
+  function getKickBadgeRawImageUrl(badge) {
+    return badge?.url
+        || badge?.src
+        || badge?.image
+        || badge?.image_url
+        || badge?.icon
+        || badge?.icon_url
+        || badge?.badge_image?.src
+        || badge?.badge_image?.url
+        || badge?.badge_image?.original
+        || badge?.badge?.src
+        || badge?.badge?.url
+        || badge?.badge?.image_url
+        || "";
+  }
+
+  function getKickBadgeImageUrl(badge) {
+    const url = getKickBadgeRawImageUrl(badge);
+    return url ? normalize7TVUrl(String(url)) : "";
+  }
+
+  function isKickLevelBadge(badge) {
+    const tipo = String(badge?.type || badge?.slug || badge?.name || badge?.text || badge?.title || badge?.alt || "").toLowerCase();
+    return tipo.includes("level")
+        || tipo === "lvl";
+  }
+
   function generateBadges(m, cosmetics) {
     let html = "";
     const kickBadges = m.identity?.badges || m.sender?.identity?.badges || [];
@@ -416,7 +431,9 @@
     kickBadges.forEach(b => {
       const tipo = (b.type || "").toLowerCase();
 
-      if (tipo === "subscriber") {
+      if (isKickLevelBadge(b)) {
+        return;
+      } else if (tipo === "subscriber") {
         const monthsRaw = b.months || b.count || b.level || b.duration || 1;
         const key = getSubBadgeKey(monthsRaw);
 
@@ -466,8 +483,14 @@
   let seventvUserCache = {};
   let seventvGlobalPaintsPromise = null;
   let seventvPaintUsersById = {};
+  let seventvChannelCosmetics = {
+    badges: {},
+    paints: {},
+    entitlements: {}
+  };
   const injected7TVPaintClasses = new Set();
   const injected7TVPaintOverlays = {};
+  const SEVENTV_USER_CACHE_TTL = 30 * 1000;
 
   function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, ch => ({
@@ -481,16 +504,34 @@
 
   function to7TVColor(value, fallback = null) {
     if (value === undefined || value === null) return fallback;
+    if (Array.isArray(value) && value.length >= 3) {
+      const [r, g, b, rawAlpha = 1] = value.map(Number);
+      if ([r, g, b].every(Number.isFinite)) {
+        const alpha = Number.isFinite(rawAlpha) ? (rawAlpha > 1 ? rawAlpha / 255 : rawAlpha) : 1;
+        const normalizedAlpha = Math.max(0, Math.min(1, alpha));
+        return normalizedAlpha >= 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${normalizedAlpha})`;
+      }
+    }
     if (typeof value === "object") {
-      if (Number.isFinite(value.r) && Number.isFinite(value.g) && Number.isFinite(value.b)) {
-        const alpha = Number.isFinite(value.a) ? Math.max(0, Math.min(1, value.a / 255)) : 1;
-        return `rgba(${value.r}, ${value.g}, ${value.b}, ${alpha})`;
+      const r = Number(value.r ?? value.red);
+      const g = Number(value.g ?? value.green);
+      const b = Number(value.b ?? value.blue);
+      if ([r, g, b].every(Number.isFinite)) {
+        const rawAlpha = Number(value.a ?? value.alpha ?? 1);
+        const alpha = Number.isFinite(rawAlpha) ? (rawAlpha > 1 ? rawAlpha / 255 : rawAlpha) : 1;
+        const normalizedAlpha = Math.max(0, Math.min(1, alpha));
+        return normalizedAlpha >= 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${normalizedAlpha})`;
       }
       if (value.hex) return to7TVColor(value.hex, fallback);
+      if (value.color) return to7TVColor(value.color, fallback);
+      if (value.value) return to7TVColor(value.value, fallback);
     }
-    if (typeof value === "number") return `#${value.toString(16).padStart(6, "0").slice(-6)}`;
+    if (typeof value === "number") return sevenTVIntToRGBA(value);
     if (typeof value === "string") {
-      const hex = value.startsWith("#") ? value.slice(1) : value;
+      const trimmed = value.trim();
+      if (!trimmed || trimmed === "none") return fallback;
+      if (trimmed === "transparent" || trimmed === "currentColor" || trimmed.startsWith("var(")) return trimmed;
+      const hex = trimmed.startsWith("#") ? trimmed.slice(1) : trimmed;
       if (/^[0-9a-f]{8}$/i.test(hex)) {
         const r = parseInt(hex.slice(0, 2), 16);
         const g = parseInt(hex.slice(2, 4), 16);
@@ -498,10 +539,12 @@
         const a = parseInt(hex.slice(6, 8), 16) / 255;
         return `rgba(${r}, ${g}, ${b}, ${a})`;
       }
-      if (/^#[0-9a-f]{3,6}$/i.test(value)) return value;
-      if (/^[0-9a-f]{6}$/i.test(value)) return `#${value}`;
-      if (/^\d+$/.test(value)) return to7TVColor(Number(value), fallback);
-      if (/^(rgb|hsl)a?\(/i.test(value)) return value;
+      if (/^#[0-9a-f]{3,6}$/i.test(trimmed)) return trimmed;
+      if (/^[0-9a-f]{6}$/i.test(trimmed)) return `#${trimmed}`;
+      if (/^\d+$/.test(trimmed)) return to7TVColor(Number(trimmed), fallback);
+      if (/^-?\d+$/.test(trimmed)) return to7TVColor(Number(trimmed), fallback);
+      if (/^(rgb|hsl)a?\(/i.test(trimmed)) return trimmed;
+      if (/^[a-z]+$/i.test(trimmed)) return trimmed;
     }
     return fallback;
   }
@@ -523,12 +566,22 @@
     return to7TVColor(value, fallback);
   }
 
-  function getKickUsernameColor(m) {
+  function getKickUsernameColorInfo(m) {
     const identity = m.identity || m.sender?.identity || {};
     const sender = m.sender || {};
-    const normalizedUsername = sender.username?.toLowerCase();
 
     const colorCandidates = [
+      m.color,
+      m.colour,
+      m.name_color,
+      m.nameColour,
+      m.nameColor,
+      m.username_color,
+      m.usernameColour,
+      m.usernameColor,
+      m.chat_color,
+      m.chatColour,
+      m.chatColor,
       identity.color,
       identity.colour,
       identity.name_color,
@@ -550,15 +603,33 @@
       sender.usernameColor,
       sender.chat_color,
       sender.chatColour,
-      sender.chatColor
+      sender.chatColor,
+      sender.identity?.color,
+      sender.identity?.colour,
+      sender.identity?.name_color,
+      sender.identity?.nameColour,
+      sender.identity?.nameColor,
+      sender.identity?.username_color,
+      sender.identity?.usernameColour,
+      sender.identity?.usernameColor,
+      sender.identity?.chat_color,
+      sender.identity?.chatColour,
+      sender.identity?.chatColor
     ];
 
     for (const value of colorCandidates) {
       const color = normalizeKickUsernameColor(value, null);
-      if (color) return color;
+      if (color) return { color, explicit: true };
     }
 
-    return pickByUsername(sender.username, KICK_USERNAME_COLORS);
+    return {
+      color: pickByUsername(sender.username || m.username, KICK_USERNAME_COLORS),
+      explicit: false
+    };
+  }
+
+  function getKickUsernameColor(m) {
+    return getKickUsernameColorInfo(m).color;
   }
 
   function normalize7TVUrl(url) {
@@ -609,8 +680,13 @@
   function get7TVPaintImageUrl(asset) {
     const images = asset?.images || asset?.image?.images || [];
     if (images.length) {
+      // Prioridad: animated avif/gif > webp > cualquier formato; escala 2x preferida
       return normalize7TVUrl(
-        images.find(img => img.mime === "image/webp" && img.scale >= 4 && !img.url.includes("_static"))?.url
+        images.find(img => (img.mime === "image/avif" || img.mime === "image/gif") && img.frameCount > 1 && img.scale >= 2)?.url
+        || images.find(img => (img.mime === "image/avif" || img.mime === "image/gif") && img.frameCount > 1)?.url
+        || images.find(img => img.mime === "image/avif" && img.scale >= 2)?.url
+        || images.find(img => img.mime === "image/avif")?.url
+        || images.find(img => img.mime === "image/webp" && img.scale >= 4 && !img.url.includes("_static"))?.url
         || images.find(img => img.mime === "image/webp" && !img.url.includes("_static"))?.url
         || images.find(img => img.mime === "image/gif" && img.scale >= 4)?.url
         || images.find(img => img.mime === "image/gif")?.url
@@ -622,16 +698,35 @@
       );
     }
 
+    const directUrl = asset?.image_url
+                   || asset?.imageUrl
+                   || asset?.url
+                   || asset?.src
+                   || asset?.href
+                   || asset?.background?.url
+                   || asset?.background_image
+                   || asset?.backgroundImage;
+    if (directUrl && !String(directUrl).startsWith("linear-gradient") && !String(directUrl).startsWith("radial-gradient")) {
+      return normalize7TVUrl(String(directUrl));
+    }
+
     return get7TVAssetUrl(asset);
   }
 
   function get7TVPaintLayers(paint) {
-    const layers = paint?.data?.layers || paint?.layers || [];
+    const layers = paint?.data?.layers
+                || paint?.layers
+                || paint?.data?.backgrounds
+                || paint?.backgrounds
+                || [];
     if (Array.isArray(layers) && layers.length) return layers;
 
     if (paint?.gradients?.length) {
       return paint.gradients.map(gradient => ({ gradient }));
     }
+
+    if (paint?.gradient) return [{ gradient: paint.gradient }];
+    if (paint?.image || paint?.image_url || paint?.imageUrl || paint?.url) return [paint];
 
     return [];
   }
@@ -657,6 +752,7 @@
         || cosmetics.find(c => c.kind === "PAINT" && c.id === activePaintId)?.data
         || cosmetics.find(c => c.type === "PAINT" && c.id === activePaintId)?.data
         || cosmetics.find(c => c.id === activePaintId)
+        || (activePaintId ? { id: activePaintId } : null)
         || null;
   }
 
@@ -680,7 +776,31 @@
 
     return cosmetics
       .filter(c => activeBadgeIds.includes(c.id) || activeBadgeIds.includes(c.badge_id))
-      .map(c => c.data || c);
+      .map(c => c.data || c)
+      .concat(activeBadgeIds.map(id => ({
+        id,
+        name: "7TV",
+        url: `https://cdn.7tv.app/badge/${id}/3x`
+      })))
+      .filter((badge, index, badges) => badges.findIndex(b => b.id === badge.id) === index);
+  }
+
+  function merge7TVCosmetics(primary, fallback) {
+    if (!primary) return fallback || null;
+    if (!fallback) return primary;
+
+    const badges = [
+      ...(primary.badges || []),
+      ...(fallback.badges || [])
+    ].filter(Boolean);
+
+    return {
+      paint: primary.paint || fallback.paint || null,
+      badges: badges.filter((badge, index) => {
+        const key = badge.id || badge.url || badge.name || index;
+        return badges.findIndex(other => (other.id || other.url || other.name) === key) === index;
+      })
+    };
   }
 
   async function fetch7TVGraphQL(query, variables) {
@@ -755,23 +875,80 @@
     }
   `;
 
+  async function fetch7TVGlobalPaintsFrom7Database() {
+    const url = "https://7database.com/api/api.php?paints";
+    const data = await raceFetch(url);
+    const paints = data?.paints || [];
+    if (!paints.length) throw new Error("7database: no paints");
+    return paints;
+  }
+
+  // ============ PAINTS ESTÁTICOS (fallback / cache local) ============
+  const STATIC_PAINTS = {
+    "01KB62BXZVZGP6E9XHAS25ZQCX": {
+      id: "01KB62BXZVZGP6E9XHAS25ZQCX",
+      name: "Little Elf",
+      data: {
+        layers: [
+          {
+            id: "01KB67CJMEAN70ZCPS6G3ZB12A",
+            opacity: 1,
+            ty: {
+              __typename: "PaintLayerTypeImage",
+              images: [
+                {
+                  url: "https://cdn.7tv.app/paint/01KB62BXZVZGP6E9XHAS25ZQCX/layer/01KB67CJMEAN70ZCPS6G3ZB12A/1x.avif",
+                  scale: 1,
+                  mime: "image/avif",
+                  frameCount: 12
+                },
+                {
+                  url: "https://cdn.7tv.app/paint/01KB62BXZVZGP6E9XHAS25ZQCX/layer/01KB67CJMEAN70ZCPS6G3ZB12A/2x.avif",
+                  scale: 2,
+                  mime: "image/avif",
+                  frameCount: 12
+                }
+              ]
+            }
+          }
+        ],
+        shadows: [
+          { color: { hex: "#235C23FF", r: 35, g: 92, b: 35, a: 255 }, offsetX: 0, offsetY: 0, blur: 2 },
+          { color: { hex: "#050505FF", r: 5,  g: 5,  b: 5,  a: 255 }, offsetX: 0, offsetY: 0, blur: 1 }
+        ]
+      }
+    }
+  };
+
   async function fetch7TVGlobalPaints() {
     if (!seventvGlobalPaintsPromise) {
-      seventvGlobalPaintsPromise = fetch7TVV3GraphQL(SEVENTV_GLOBAL_PAINTS_QUERY)
-        .then(data => {
-          const paints = data?.cosmetics?.paints || [];
-          seventvPaintUsersById = {};
-          paints.forEach(paint => {
-            collect7TVPaintUserIds(paint).forEach(userId => {
-              seventvPaintUsersById[userId] = paint.id;
-            });
+      seventvGlobalPaintsPromise = (async () => {
+        let paints = [];
+
+        // Fuente primaria: 7database.com (más rápido, sin GraphQL)
+        try {
+          paints = await fetch7TVGlobalPaintsFrom7Database();
+        } catch (err) {
+          console.warn("7database paints fallback a 7TV GraphQL:", err);
+          // Fallback: GraphQL oficial de 7TV
+          const data = await fetch7TVV3GraphQL(SEVENTV_GLOBAL_PAINTS_QUERY);
+          paints = data?.cosmetics?.paints || [];
+        }
+
+        seventvPaintUsersById = {};
+        paints.forEach(paint => {
+          collect7TVPaintUserIds(paint).forEach(userId => {
+            seventvPaintUsersById[userId] = paint.id;
           });
-          return Object.fromEntries(paints.map(p => [p.id, p]));
-        })
-        .catch(err => {
-          seventvGlobalPaintsPromise = null;
-          throw err;
         });
+
+        // Mezclar paints estáticos: los dinámicos tienen prioridad, los estáticos llenan los huecos
+        const dynamicById = Object.fromEntries(paints.map(p => [p.id, p]));
+        return { ...STATIC_PAINTS, ...dynamicById };
+      })().catch(err => {
+        seventvGlobalPaintsPromise = null;
+        throw err;
+      });
     }
 
     return seventvGlobalPaintsPromise;
@@ -788,6 +965,168 @@
       console.warn("7TV global paints failed:", err);
       return paint;
     }
+  }
+
+  function sevenTVIntToRGBA(value) {
+    const n = Number(value) >>> 0;
+    const r = (n >>> 24) & 255;
+    const g = (n >>> 16) & 255;
+    const b = (n >>> 8) & 255;
+    const a = (n & 255) / 255;
+    return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
+  }
+
+  function normalize7TVEventPaint(id, object) {
+    const data = object?.data || object || {};
+    const func = data.function || data.func;
+    const stops = (data.stops || []).map(stop => ({
+      ...stop,
+      color: typeof stop.color === "number" ? sevenTVIntToRGBA(stop.color) : stop.color
+    }));
+    const shadows = (data.shadows || []).map(shadow => ({
+      ...shadow,
+      color: typeof shadow.color === "number" ? sevenTVIntToRGBA(shadow.color) : shadow.color
+    }));
+
+    return {
+      id,
+      name: object?.name || data.name || id,
+      color: typeof data.color === "number" ? sevenTVIntToRGBA(data.color) : data.color,
+      gradients: func ? [{
+        function: func,
+        angle: data.angle,
+        repeat: data.repeat,
+        stops,
+        image_url: data.image_url,
+        shape: data.shape
+      }] : [],
+      shadows
+    };
+  }
+
+  function normalize7TVEventBadge(id, object) {
+    return {
+      id,
+      name: object?.name || id,
+      images: object?.images || [],
+      url: `https://cdn.7tv.app/badge/${id}/3x`
+    };
+  }
+
+  function get7TVEventKickConnectionIds(user) {
+    return (user?.connections || [])
+      .filter(connection => connection?.platform === "KICK")
+      .flatMap(connection => [
+        connection.id,
+        connection.platformId,
+        connection.platform_id,
+        connection.platformUserId,
+        connection.platform_user_id
+      ])
+      .filter(Boolean)
+      .map(String);
+  }
+
+  function upsert7TVEntitlement(kickUserIds, kind, refId) {
+    kickUserIds.forEach(userId => {
+      const current = seventvChannelCosmetics.entitlements[userId] || {};
+      seventvChannelCosmetics.entitlements[userId] = {
+        ...current,
+        [kind === "BADGE" ? "badge" : "paint"]: refId
+      };
+      delete seventvUserCache[`${userId}:`];
+    });
+  }
+
+  function delete7TVEntitlement(kickUserIds, kind, refId) {
+    kickUserIds.forEach(userId => {
+      const current = seventvChannelCosmetics.entitlements[userId];
+      if (!current) return;
+      const key = kind === "BADGE" ? "badge" : "paint";
+      if (current[key] === refId) {
+        seventvChannelCosmetics.entitlements[userId] = { ...current, [key]: undefined };
+      }
+      delete seventvUserCache[`${userId}:`];
+    });
+  }
+
+  function handle7TVCosmeticsEvent(eventData) {
+    const type = eventData?.type;
+    const object = eventData?.body?.object;
+    const kind = object?.kind;
+    const id = eventData?.body?.id || object?.id || object?.ref_id;
+    const refId = object?.ref_id || id;
+
+    if (type === "cosmetic.create" && kind === "BADGE" && id) {
+      seventvChannelCosmetics.badges[id] = normalize7TVEventBadge(id, object);
+      return;
+    }
+
+    if (type === "cosmetic.create" && kind === "PAINT" && id) {
+      seventvChannelCosmetics.paints[id] = normalize7TVEventPaint(id, object);
+      return;
+    }
+
+    if ((type === "entitlement.create" || type === "entitlement.delete") && (kind === "BADGE" || kind === "PAINT")) {
+      const kickUserIds = get7TVEventKickConnectionIds(object?.user);
+      if (!kickUserIds.length || !refId) return;
+      if (type === "entitlement.create") {
+        upsert7TVEntitlement(kickUserIds, kind, refId);
+      } else {
+        delete7TVEntitlement(kickUserIds, kind, refId);
+      }
+    }
+  }
+
+  function reset7TVChannelCosmetics() {
+    if (sevenTVEventSource) {
+      sevenTVEventSource.close();
+      sevenTVEventSource = null;
+    }
+    seventvChannelCosmetics = {
+      badges: {},
+      paints: {},
+      entitlements: {}
+    };
+  }
+
+  function connect7TVCosmeticsEvents(kickUserId, emoteSetId = null) {
+    reset7TVChannelCosmetics();
+    if (!kickUserId || !window.EventSource) return;
+
+    const channelContext = `<ctx=channel;platform=KICK;id=${kickUserId}>`;
+    const topics = [
+      `entitlement.*${channelContext}`,
+      `cosmetic.*${channelContext}`
+    ];
+    if (emoteSetId) topics.push(`emote_set.*<object_id=${emoteSetId}>`);
+
+    const url = `https://events.7tv.io/v3@${topics.join(",")}`;
+    sevenTVEventSource = new EventSource(url);
+    sevenTVEventSource.addEventListener("dispatch", event => {
+      try {
+        handle7TVCosmeticsEvent(JSON.parse(event.data));
+      } catch (err) {
+        console.warn("7TV cosmetics event failed:", err);
+      }
+    });
+    sevenTVEventSource.addEventListener("error", err => {
+      console.warn("7TV cosmetics stream error:", err);
+    });
+  }
+
+  function get7TVCosmeticsFromEntitlements(kickUserId) {
+    const entitlement = seventvChannelCosmetics.entitlements[String(kickUserId || "")];
+    if (!entitlement) return null;
+
+    const paint = entitlement.paint ? seventvChannelCosmetics.paints[entitlement.paint] : null;
+    const badge = entitlement.badge ? seventvChannelCosmetics.badges[entitlement.badge] : null;
+    if (!paint && !badge) return null;
+
+    return {
+      paint: paint || null,
+      badges: badge ? [badge] : []
+    };
   }
 
   const SEVENTV_USER_STYLE_QUERY = `
@@ -872,8 +1211,15 @@
   }
 
   async function fetch7TVUserCosmetics(kickUserId, username = "") {
-    const cacheKey = kickUserId || username?.toLowerCase();
-    if (!cacheKey || seventvUserCache[cacheKey] !== undefined) return seventvUserCache[cacheKey];
+    const normalizedUsername = username?.toLowerCase() || "";
+    const cacheKey = `${kickUserId || ""}:${normalizedUsername}`;
+    const entitlementCosmetics = get7TVCosmeticsFromEntitlements(kickUserId);
+
+    const cached = seventvUserCache[cacheKey];
+    if (cached && Date.now() - cached.time < SEVENTV_USER_CACHE_TTL) {
+      return merge7TVCosmetics(entitlementCosmetics, cached.value);
+    }
+    if (!kickUserId && !normalizedUsername) return entitlementCosmetics || null;
 
     if (username) {
       try {
@@ -884,8 +1230,9 @@
         const cosmetics = normalize7TVGraphQLUser(data, kickUserId, username);
         if (cosmetics?.paint || cosmetics?.badges?.length) {
           cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
-          seventvUserCache[cacheKey] = cosmetics;
-          return cosmetics;
+          const merged = merge7TVCosmetics(entitlementCosmetics, cosmetics);
+          seventvUserCache[cacheKey] = { value: merged, time: Date.now() };
+          return merged;
         }
       } catch (err) {
         console.warn("7TV v4 fallback failed:", username, err);
@@ -902,11 +1249,12 @@
         badges: pickActive7TVBadges(data.user)
       };
       cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
-      seventvUserCache[cacheKey] = cosmetics;
-      return cosmetics;
+      const merged = merge7TVCosmetics(entitlementCosmetics, cosmetics);
+      seventvUserCache[cacheKey] = { value: merged, time: Date.now() };
+      return merged;
     } catch {
-      seventvUserCache[cacheKey] = null;
-      return null;
+      seventvUserCache[cacheKey] = { value: entitlementCosmetics || null, time: Date.now() };
+      return entitlementCosmetics || null;
     }
   }
 
@@ -970,17 +1318,21 @@
           };
         }
       });
-    } catch {}
+      return emoteSet?.id || null;
+    } catch {
+      return null;
+    }
   }
 
   async function loadAllThirdPartyData() {
     statusMsg.textContent = "Cargando emotes...";
-    await Promise.all([
+    const [emoteSetId] = await Promise.all([
       loadChannelCustom7TVSets(),
       loadFFZData(),
       loadBTTVData(),
       load7TVData()
     ]);
+    return { emoteSetId };
   }
 
   function processEmotes(text) {
@@ -1051,22 +1403,26 @@
   function build7TVPaintBackgroundLayers(paint, base) {
     const backgroundLayers = [];
     const solidColors = [];
+    const layerOpacities = [];
 
     get7TVPaintLayers(paint).forEach(layer => {
-      const ty = layer.ty || layer.image || {};
-      const gradient = layer.gradient || layer.linearGradient || layer.radialGradient || ty;
+      const ty = layer.ty || layer.type || layer.image || layer;
+      const gradient = layer.gradient || layer.linearGradient || layer.radialGradient || layer.background || ty;
+      const typeName = String(ty.__typename || ty.type || ty.kind || gradient.type || gradient.function || "").toUpperCase();
+      const rawOpacity = Number(layer.opacity ?? ty.opacity ?? gradient.opacity);
+      if (Number.isFinite(rawOpacity)) layerOpacities.push(Math.max(0, Math.min(1, rawOpacity > 1 ? rawOpacity / 100 : rawOpacity)));
 
-      if (ty.__typename === "PaintLayerTypeSingleColor" && ty.color) {
-        solidColors.push(to7TVColor(ty.color, base));
+      if ((typeName.includes("SINGLECOLOR") || typeName === "COLOR" || typeName.includes("SOLID")) && (ty.color || layer.color)) {
+        solidColors.push(to7TVColor(ty.color || layer.color, base));
         return;
       }
 
-      if ((ty.__typename === "PaintLayerTypeLinearGradient" || ty.__typename === "PaintLayerTypeRadialGradient") && ty.stops?.length) {
+      if ((typeName.includes("LINEARGRADIENT") || typeName.includes("RADIALGRADIENT")) && ty.stops?.length) {
         const stops = ty.stops
           .map(s => `${to7TVColor(s.color, base)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
           .join(", ");
         backgroundLayers.push(
-          ty.__typename === "PaintLayerTypeRadialGradient"
+          typeName.includes("RADIAL")
             ? `radial-gradient(circle, ${stops})`
             : `linear-gradient(${ty.angle || 90}deg, ${stops})`
         );
@@ -1075,14 +1431,14 @@
 
       const imageUrl = get7TVPaintImageUrl(ty) || get7TVPaintImageUrl(layer);
       if (imageUrl) {
-        backgroundLayers.push(`url("${imageUrl}")`);
+        backgroundLayers.push(`url("${imageUrl.replace(/"/g, "%22")}")`);
         return;
       }
 
       const gradientFunction = String(gradient.function || "").toUpperCase();
-      const gradientImageUrl = normalize7TVUrl(gradient.image_url || "");
-      if (gradientImageUrl && gradientFunction.includes("URL")) {
-        backgroundLayers.push(`url("${gradientImageUrl}")`);
+      const gradientImageUrl = normalize7TVUrl(gradient.image_url || gradient.imageUrl || "");
+      if (gradientImageUrl && (gradientFunction.includes("URL") || !gradient.stops?.length)) {
+        backgroundLayers.push(`url("${gradientImageUrl.replace(/"/g, "%22")}")`);
         return;
       }
 
@@ -1106,7 +1462,8 @@
 
     return {
       backgroundLayers,
-      solidColor: solidColors.find(Boolean) || to7TVColor(paint?.color, null)
+      solidColor: solidColors.find(Boolean) || to7TVColor(paint?.color, null),
+      opacity: layerOpacities.find(value => value < 1) ?? null
     };
   }
 
@@ -1115,38 +1472,84 @@
 
     const className = get7TVPaintClassName(paint.id);
     if (injected7TVPaintClasses.has(className)) {
-      return { className, hasOverlay: !!injected7TVPaintOverlays[className] };
+      return { className, hasDirect: !!injected7TVPaintOverlays[className] };
     }
 
     const { backgroundLayers, solidColor } = build7TVPaintBackgroundLayers(paint, base);
+
     const shadowsData = [
       ...(paint.shadows || []),
       ...(paint.text?.shadows || []),
       ...(!paint.shadows?.length && !paint.text?.shadows?.length ? (paint.data?.shadows || []) : [])
     ];
-    const hasImageLayer = backgroundLayers.some(layer => layer.startsWith("url("));
-    const shadowStyles = hasImageLayer ? "" : build7TVShadowStyles(shadowsData);
-    const color = solidColor || "var(--kick-name-color)";
-    const declarations = hasImageLayer
-      ? `color: ${color}; --seventv-paint-bg: ${backgroundLayers.join(", ")}; --seventv-paint-opacity: 0.62;${shadowStyles}`
-      : backgroundLayers.length
-        ? `color: ${color}; background-image: ${backgroundLayers.join(", ")}; background-color: currentColor; background-size: cover; background-position: center; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 0px;${shadowStyles}`
-        : `color: ${color};${shadowStyles}`;
+
+    // Construir filter drop-shadow igual que 7database
+    const filterParts = shadowsData.map(s => {
+      const color = to7TVColor(s.color, "rgba(0,0,0,0.85)");
+      const x = s.x_offset ?? s.offsetX ?? 0;
+      const y = s.y_offset ?? s.offsetY ?? 0;
+      const blur = s.radius ?? s.blur ?? 0;
+      return `drop-shadow(${color} ${x}px ${y}px ${blur}px)`;
+    });
+    const filterStyle = filterParts.length ? `filter: ${filterParts.join(" ")};` : "";
+
+    let declarations;
+
+    if (backgroundLayers.length > 0) {
+      // Detectar si es un paint de imagen animada (AVIF sprite sheet)
+      const layers = get7TVPaintLayers(paint);
+      const imageLayer = layers.find(l => {
+        const ty = l.ty || l.type || l;
+        return String(ty.__typename || "").includes("Image");
+      });
+      const imageTy = imageLayer?.ty || imageLayer?.type || imageLayer;
+      const animImages = (imageTy?.images || []).filter(img => img.frameCount > 1);
+      const isAnimatedSprite = animImages.length > 0;
+
+      let animDecl = "";
+      if (isAnimatedSprite) {
+        // El AVIF de 7TV es un sprite sheet vertical: N frames apilados verticalmente
+        // background-size: 100% * N, luego se anima con steps(N)
+        const frameCount = animImages[0].frameCount;
+        const keyframeName = `${className}-anim`;
+        const keyframes = `@keyframes ${keyframeName} { from { background-position: 0% 0%; } to { background-position: 0% 100%; } }`;
+        get7TVPaintStyleSheet().appendChild(document.createTextNode(keyframes + "\n"));
+        animDecl = `background-size: 100% ${frameCount * 100}%; animation: ${keyframeName} ${frameCount * 0.05}s steps(${frameCount}) infinite;`;
+      }
+
+      // Gradiente o imagen: background-clip: text directo (metodo 7database)
+      declarations = [
+        `background-image: ${backgroundLayers.join(", ")};`,
+        isAnimatedSprite ? "" : `background-size: cover;`,
+        isAnimatedSprite ? "" : `background-position: center center;`,
+        animDecl,
+        `-webkit-background-clip: text;`,
+        `background-clip: text;`,
+        `-webkit-text-fill-color: transparent;`,
+        `color: transparent;`,
+        filterStyle
+      ].filter(Boolean).join(" ");
+    } else {
+      // Solo color solido
+      const color = solidColor || "var(--kick-name-color)";
+      declarations = `color: ${color}; -webkit-text-fill-color: ${color}; ${filterStyle}`;
+    }
 
     get7TVPaintStyleSheet().appendChild(document.createTextNode(`.${className}{${declarations}}\n`));
     injected7TVPaintClasses.add(className);
-    injected7TVPaintOverlays[className] = hasImageLayer;
-    return { className, hasOverlay: hasImageLayer };
+    injected7TVPaintOverlays[className] = backgroundLayers.length > 0;
+    return { className, hasDirect: backgroundLayers.length > 0 };
   }
 
   function generateNamePaint(m, cosmetics) {
-    const base = getKickUsernameColor(m);
+    const colorInfo = getKickUsernameColorInfo(m);
+    const base = colorInfo.color;
     const style = `--kick-name-color: ${base}; color: ${base};`;
     const paintClass = ENABLE_7TV_NAME_PAINTS ? ensure7TVPaintClass(cosmetics?.paint, base) : null;
     return {
       style,
       className: paintClass?.className || "",
-      hasOverlay: !!paintClass?.hasOverlay
+      hasDirect: !!paintClass?.hasDirect
     };
   }
 
@@ -1168,7 +1571,7 @@
 
     const msg = document.createElement("div");
     msg.className = "msg";
-    msg.innerHTML = `<span class="meta"><span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-overlay="${namePaint.hasOverlay ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span></span><span class="text">${content}</span>`;
+    msg.innerHTML = `<span class="meta"><span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-paint-direct="${namePaint.hasDirect ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span></span><span class="text">${content}</span>`;
 
     chatDiv.appendChild(msg);
     chatDiv.scrollTop = chatDiv.scrollHeight;
@@ -1221,7 +1624,8 @@
       CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
 
       await loadChannelSubBadges(channelName);
-      await loadAllThirdPartyData();
+      const thirdPartyData = await loadAllThirdPartyData();
+      connect7TVCosmeticsEvents(STREAMER_USER_ID, thirdPartyData.emoteSetId);
 
       const isDirectLink = getUrlParams() !== null;
       if (isDirectLink) {
