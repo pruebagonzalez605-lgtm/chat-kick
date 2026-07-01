@@ -246,9 +246,14 @@
     "broadcaster": "assets/broadcaster.png",
     "og": "assets/og.png",
     "subscriber": "assets/subscriber.png",
-    "sub_gifter": "assets/sub_gifter.png",
-    "founder": "assets/founder.png"
+    "founder": "assets/founder.png",
+    "staff": "assets/admin.svg",
   };
+
+  // SVG nativo real de Kick para el badge de "gifter" (regaló subs). Es un ícono
+  // FIJO — no cambia de color según la cantidad regalada. La cantidad solo se
+  // muestra en el tooltip (title), igual que hace Kick.
+  const KICK_GIFTER_BADGE_SVG = `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_162_470)"><g clip-path="url(#clip1_162_470)"><path d="M22.34 9.5L26 4H18L16 7L14 4H6L9.66 9.5H4V15.1H28V9.5H22.34Z" fill="#53FC18"></path><path d="M26.0799 19.0996H5.8999V28.4996H26.0799V19.0996Z" fill="#53FC18"></path><path d="M26.0799 15.0996H5.8999V19.0996H26.0799V15.0996Z" fill="#32970E"></path></g></g><defs><clipPath id="clip0_162_470"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath><clipPath id="clip1_162_470"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath></defs></svg>`;
 
   const KICK_USERNAME_COLORS = [
     "#00ff66", "#53fc18", "#00c7ff", "#0095ff", "#1da1f2", "#00aeef",
@@ -335,6 +340,14 @@
   const smartFetch = raceFetch;
 
   // ============ CARGAR BADGES DE SUSCRIPTOR ============
+  // Kick devuelve este badge genérico cuando el canal NO tiene sub-badges propios.
+  // Lo tratamos como "no personalizado" para poder usar nuestro default local.
+  const KICK_GENERIC_SUB_BADGE_ID = "754874";
+
+  function isGenericKickSubBadge(url) {
+    return typeof url === "string" && url.includes(KICK_GENERIC_SUB_BADGE_ID);
+  }
+
   async function loadChannelSubBadges(channelSlug) {
     try {
       const data = await smartFetch(`https://kick.com/api/v2/channels/${channelSlug}/info`);
@@ -351,7 +364,9 @@
 
           if (badgeUrl) {
             if (!badgeUrl.startsWith('http')) badgeUrl = `https:${badgeUrl}`;
-            subBadgesByMonths[monthsKey] = badgeUrl;
+            if (!isGenericKickSubBadge(badgeUrl)) {
+              subBadgesByMonths[monthsKey] = badgeUrl;
+            }
           }
         });
       }
@@ -362,9 +377,12 @@
         if (fallbackData?.subscriber_badges) {
           fallbackData.subscriber_badges.forEach(tier => {
             const monthsKey = String(tier.months || tier.level || 1);
-            const badgeUrl = tier.image_url || tier.badge?.src || tier.badge_image?.src || tier.url;
+            let badgeUrl = tier.image_url || tier.badge?.src || tier.badge_image?.src || tier.url;
             if (monthsKey && badgeUrl) {
-              subBadgesByMonths[monthsKey] = badgeUrl.startsWith('http') ? badgeUrl : `https:${badgeUrl}`;
+              badgeUrl = badgeUrl.startsWith('http') ? badgeUrl : `https:${badgeUrl}`;
+              if (!isGenericKickSubBadge(badgeUrl)) {
+                subBadgesByMonths[monthsKey] = badgeUrl;
+              }
             }
           });
         }
@@ -375,7 +393,7 @@
         statusMsg.textContent += ` | ${Object.keys(subBadgesByMonths).length} sub-badges (meses: ${meses})`;
         console.log("Sub-badges cargados:", subBadgesByMonths);
       } else {
-        statusMsg.textContent += " | No sub-badges personalizados";
+        statusMsg.textContent += " | No sub-badges personalizados (usando default local)";
       }
     } catch (err) {
       console.error("Error sub-badges:", err);
@@ -428,10 +446,27 @@
     let html = "";
     const kickBadges = m.identity?.badges || m.sender?.identity?.badges || [];
 
+    // badges_v2: array SEPARADO donde Kick manda badges "globales" (por ahora,
+    // el de nivel) con su image_url ya resuelta, distinto del array "badges" clásico.
+    const kickBadgesV2 = m.identity?.badges_v2 || m.sender?.identity?.badges_v2 || [];
+    kickBadgesV2.forEach(b => {
+      const name = (b.name || "").toLowerCase();
+      if (name === "level" && b.image_url && b.selected !== false) {
+        const level = b.metadata?.level ?? "";
+        html += `<img src="${b.image_url}" alt="Nivel ${level}" class="badge-icon" title="Nivel ${level}">`;
+      }
+    });
+
     kickBadges.forEach(b => {
       const tipo = (b.type || "").toLowerCase();
 
       if (isKickLevelBadge(b)) {
+        // Fallback legado: normalmente el nivel viene por badges_v2 (arriba), no por acá.
+        const levelUrl = getKickBadgeImageUrl(b);
+        const levelNum = b.level || b.count || b.text || "";
+        if (levelUrl) {
+          html += `<img src="${levelUrl}" alt="Nivel ${levelNum}" class="badge-icon" title="Nivel ${levelNum}">`;
+        }
         return;
       } else if (tipo === "subscriber") {
         const monthsRaw = b.months || b.count || b.level || b.duration || 1;
@@ -450,16 +485,22 @@
           }
         }
 
-        // Último fallback genérico
+        // Último fallback genérico: usa el ícono default ya declarado en KICK_BADGES
         if (!badgeUrl) {
-          badgeUrl = "https://files.kick.com/channel_subscriber_badges/754874/original";
+          badgeUrl = KICK_BADGES["subscriber"];
         }
 
         html += `<img src="${badgeUrl}" alt="Suscriptor ${monthsRaw} meses" class="badge-icon" title="Suscriptor ${monthsRaw} meses (tier ${key})">`;
+      } else if (tipo === "sub_gifter") {
+        const giftCount = b.count || b.gifted || b.amount || 0;
+
+        html += `<span class="badge-icon" title="Regaló ${giftCount} suscripciones" style="display:inline-flex;vertical-align:middle;margin-right:3px;">${KICK_GIFTER_BADGE_SVG}</span>`;
       } else {
         const icon = KICK_BADGES[tipo];
         if (icon) {
           html += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
+        } else {
+          console.log("🔍 DEBUG badge sin mapear (raw):", JSON.stringify(b));
         }
       }
     });
@@ -1189,19 +1230,25 @@
   function normalize7TVGraphQLUser(data, kickUserId, username) {
     const exact = data?.byConnection?.userByConnection;
     const items = data?.bySearch?.search?.items || [];
-    const normalizedUsername = username?.toLowerCase();
-    const hasCosmetics = user => !!(user?.style?.activePaint || user?.style?.activeBadge);
+    const normalizedUsername = username?.toLowerCase() || "";
 
+    // Búsqueda de 7TV es "fuzzy" (por texto) y puede devolver cuentas de OTRA persona
+    // con un nombre parecido (ej. "Lilbastt" -> "lil_nas_t"). Por eso solo aceptamos un
+    // resultado de bySearch si es KICK y coincide exactamente el ID (si lo tenemos) y el
+    // username (si lo tenemos). Nunca se acepta "cualquier resultado de Kick" ni "el primer
+    // resultado" como fallback genérico: eso es lo que causaba que se le pusiera pintura/badge
+    // de otra persona a alguien que no la tiene.
     const searched = items.find(item => {
       const connection = item.mainConnection || {};
-      return connection.platform === "KICK"
-          && (!kickUserId || connection.platformId === String(kickUserId))
-          && (!normalizedUsername || connection.platformUsername?.toLowerCase() === normalizedUsername);
-    }) || items.find(item => item.mainConnection?.platformUsername?.toLowerCase() === normalizedUsername)
-       || items.find(item => item.mainConnection?.platform === "KICK")
-       || items[0];
+      if (connection.platform !== "KICK") return false;
+      if (kickUserId && connection.platformId !== String(kickUserId)) return false;
+      if (normalizedUsername && connection.platformUsername?.toLowerCase() !== normalizedUsername) return false;
+      return true;
+    }) || null;
 
-    const user = hasCosmetics(searched) ? searched : (exact || searched);
+    // "exact" viene de una consulta directa por platformId (ID exacto de Kick) y es la
+    // fuente más confiable. Solo usamos "searched" si "exact" no existe.
+    const user = exact || searched;
     if (!user) return null;
 
     return {
