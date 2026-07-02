@@ -248,6 +248,7 @@
     "subscriber": "assets/subscriber.png",
     "founder": "assets/founder.png",
     "staff": "assets/admin.svg",
+    "flyby": "https://ext.cdn.kick.com/chat/badges/Flyby_019f123f-3354-7242-8e1d-6f608afacc92.png",
   };
 
   // SVG nativo real de Kick para el badge de "gifter" (regaló subs). Es un ícono
@@ -446,14 +447,22 @@
     let html = "";
     const kickBadges = m.identity?.badges || m.sender?.identity?.badges || [];
 
-    // badges_v2: array SEPARADO donde Kick manda badges "globales" (por ahora,
-    // el de nivel) con su image_url ya resuelta, distinto del array "badges" clásico.
+    // badges_v2: array SEPARADO donde Kick manda badges "globales" (nivel, Flyby, etc.)
+    // con su image_url ya resuelta, distinto del array "badges" clásico.
+    // Kick los muestra DESPUÉS de los badges clásicos (ej: Suscriptor -> Flyby), así que
+    // armamos este HTML aparte y lo concatenamos al final, luego de los badges clásicos.
     const kickBadgesV2 = m.identity?.badges_v2 || m.sender?.identity?.badges_v2 || [];
+    let badgesV2Html = "";
     kickBadgesV2.forEach(b => {
       const name = (b.name || "").toLowerCase();
       if (name === "level" && b.image_url && b.selected !== false) {
         const level = b.metadata?.level ?? "";
-        html += `<img src="${b.image_url}" alt="Nivel ${level}" class="badge-icon" title="Nivel ${level}">`;
+        badgesV2Html += `<img src="${b.image_url}" alt="Nivel ${level}" class="badge-icon" title="Nivel ${level}">`;
+      } else if (b.image_url && b.selected !== false) {
+        // Cualquier otro badge_v2 (ej: Flyby u otros nuevos) que traiga su propia image_url
+        badgesV2Html += `<img src="${b.image_url}" alt="${b.name || 'badge'}" class="badge-icon" title="${b.name || 'badge'}">`;
+      } else {
+        console.log("🔍 DEBUG badge_v2 sin mapear (raw):", JSON.stringify(b));
       }
     });
 
@@ -504,6 +513,8 @@
         }
       }
     });
+
+    html += badgesV2Html;
 
     // 7TV badges
     if (cosmetics?.badges?.length) {
