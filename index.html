@@ -449,15 +449,16 @@
 
     // badges_v2: array SEPARADO donde Kick manda badges "globales" (nivel, Flyby, etc.)
     // con su image_url ya resuelta, distinto del array "badges" clásico.
-    // Kick los muestra DESPUÉS de los badges clásicos (ej: Suscriptor -> Flyby), así que
-    // armamos este HTML aparte y lo concatenamos al final, luego de los badges clásicos.
+    // El NIVEL se muestra primero de todos. El resto (ej: Flyby) se muestra DESPUÉS
+    // de los badges clásicos (ej: Suscriptor -> Flyby), como en el chat real de Kick.
     const kickBadgesV2 = m.identity?.badges_v2 || m.sender?.identity?.badges_v2 || [];
+    let levelHtml = "";
     let badgesV2Html = "";
     kickBadgesV2.forEach(b => {
       const name = (b.name || "").toLowerCase();
       if (name === "level" && b.image_url && b.selected !== false) {
         const level = b.metadata?.level ?? "";
-        badgesV2Html += `<img src="${b.image_url}" alt="Nivel ${level}" class="badge-icon" title="Nivel ${level}">`;
+        levelHtml += `<img src="${b.image_url}" alt="Nivel ${level}" class="badge-icon" title="Nivel ${level}">`;
       } else if (b.image_url && b.selected !== false) {
         // Cualquier otro badge_v2 (ej: Flyby u otros nuevos) que traiga su propia image_url
         badgesV2Html += `<img src="${b.image_url}" alt="${b.name || 'badge'}" class="badge-icon" title="${b.name || 'badge'}">`;
@@ -465,6 +466,8 @@
         console.log("🔍 DEBUG badge_v2 sin mapear (raw):", JSON.stringify(b));
       }
     });
+
+    html += levelHtml;
 
     kickBadges.forEach(b => {
       const tipo = (b.type || "").toLowerCase();
