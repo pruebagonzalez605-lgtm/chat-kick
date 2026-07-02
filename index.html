@@ -251,10 +251,97 @@
     "flyby": "https://ext.cdn.kick.com/chat/badges/Flyby_019f123f-3354-7242-8e1d-6f608afacc92.png",
   };
 
-  // SVG nativo real de Kick para el badge de "gifter" (regaló subs). Es un ícono
-  // FIJO — no cambia de color según la cantidad regalada. La cantidad solo se
-  // muestra en el tooltip (title), igual que hace Kick.
-  const KICK_GIFTER_BADGE_SVG = `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_162_470)"><g clip-path="url(#clip1_162_470)"><path d="M22.34 9.5L26 4H18L16 7L14 4H6L9.66 9.5H4V15.1H28V9.5H22.34Z" fill="#53FC18"></path><path d="M26.0799 19.0996H5.8999V28.4996H26.0799V19.0996Z" fill="#53FC18"></path><path d="M26.0799 15.0996H5.8999V19.0996H26.0799V15.0996Z" fill="#32970E"></path></g></g><defs><clipPath id="clip0_162_470"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath><clipPath id="clip1_162_470"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath></defs></svg>`;
+  // SVG nativo real de Kick para el badge de "gifter" (regaló subs). El ícono
+  // cambia de color según cuántas subs regaló, igual que hace Kick en el chat.
+  //
+  // IMPORTANTE: Kick usa VARIAS formas de ícono distintas según el tier:
+  //   - Tiers 1, 5, 10, 25, 50            -> forma "corona" (caja con picos arriba, 3 paths + clipPath)
+  //   - Tiers 100, 150, 200, 250, 300     -> forma "caja con listón vertical" (2 paths, sin clipPath)
+  //   - Tiers 500, 700                    -> forma "caja alta" propia (3 paths)
+  //   - Tier 1000                         -> forma "moño morado + brillos" propia
+  //     todas confirmadas con SVGs reales que mandaste.
+  //
+  // Tiers reales de Kick (según las capturas + SVGs que mandaste):
+  //   1    -> verde     (#53FC18 / #32970E)  [forma corona]
+  //   5    -> turquesa  (#2EFAD1 / #00A18D)  [forma corona]
+  //   10   -> morado    (#DEB2FF / #B664F6)  [forma corona]
+  //   25   -> rosa      (#FBCFD8 / #E96E87)  [forma corona]
+  //   50   -> dorado    (#FFD899 / #FF9D00)  [forma corona]
+  //   100  -> verde     (#DDFED1 / #53FC18)  [forma caja+listón, confirmado]
+  //   150  -> turquesa  (#93EBE0 / #00CCB3)  [forma caja+listón, confirmado]
+  //   200  -> azul      (#B9D6F6 / #72ACED)  [forma caja+listón, confirmado]
+  //   250  -> morado    (#DEB2FF / #BC66FF)  [forma caja+listón, confirmado]
+  //   300  -> rosa      (#FBCFD8 / #F2708A)  [forma caja+listón, confirmado]
+  //   400  -> verde/morado (#53FC18 / #BC66FF) [forma caja+listón, confirmado]
+  //   500  -> verde     (#DDFED1 / #53FC18)  [forma propia "caja alta", confirmado con SVG real]
+  //   700  -> rosa      (#FBCFD8 / #F2708A)  [forma propia "caja alta", confirmado con SVG real]
+  //   900  -> rojo/turq (#F2708A / #E9113C + moño #31D6C2, sin brillos) [forma propia "bow", confirmado con SVG real]
+  //   950  -> dorado/teal (#FFC466 / #FF9D00 + moño #00AD93, sin brillos) [forma propia "bow", confirmado con SVG real]
+  //   1000 -> verde/morado (#53FC18 / #32970E + moño #BC66FF + brillos) [forma propia "sparkle", confirmado con SVG real]
+  //   2000 -> turquesa/rosa (#00CCB3 / #00A18D + moño #F2708A + brillos) [forma propia "sparkle", confirmado con SVG real, umbral aproximado]
+  //   3000 -> morado/azul  (#DEB2FF / #BC66FF + moño #1475E1 + brillos) [forma propia "sparkle", confirmado con SVG real, umbral aproximado]
+  //   4000 -> rojo/verde   (#F2708A / #E9113C + moño #53FC18 + brillos) [forma propia "sparkle", confirmado con SVG real, umbral aproximado]
+  const GIFTER_BADGE_TIERS = [
+    { min: 4000, light: "#F2708A", dark: "#E9113C", accent: "#53FC18", shape: "sparkle" }, // rojo + moño verde (confirmado, umbral aproximado)
+    { min: 3000, light: "#DEB2FF", dark: "#BC66FF", accent: "#1475E1", shape: "sparkle" }, // morado + moño azul (confirmado, umbral aproximado)
+    { min: 2000, light: "#00CCB3", dark: "#00A18D", accent: "#F2708A", shape: "sparkle" }, // turquesa + moño rosa (confirmado, umbral aproximado)
+    { min: 1000, light: "#53FC18", dark: "#32970E", accent: "#BC66FF", shape: "sparkle" }, // verde + moño morado
+    { min: 950, light: "#FFC466", dark: "#FF9D00", accent: "#00AD93", shape: "bow" },      // dorado + moño teal (confirmado)
+    { min: 900, light: "#F2708A", dark: "#E9113C", accent: "#31D6C2", shape: "bow" },      // rojo + moño turquesa (confirmado)
+    { min: 700, light: "#FBCFD8", dark: "#F2708A", shape: "box-tall" }, // rosa (confirmado)
+    { min: 500, light: "#DDFED1", dark: "#53FC18", shape: "box-tall" }, // verde
+    { min: 400, light: "#53FC18", dark: "#BC66FF", shape: "box" },    // verde + listón morado (confirmado)
+    { min: 300, light: "#FBCFD8", dark: "#F2708A", shape: "box" },    // rosa (confirmado)
+    { min: 250, light: "#DEB2FF", dark: "#BC66FF", shape: "box" },    // morado (confirmado)
+    { min: 200, light: "#B9D6F6", dark: "#72ACED", shape: "box" },    // azul (confirmado)
+    { min: 150, light: "#93EBE0", dark: "#00CCB3", shape: "box" },    // turquesa (confirmado)
+    { min: 100, light: "#DDFED1", dark: "#53FC18", shape: "box" },    // verde (confirmado)
+    { min: 50,  light: "#FFD899", dark: "#FF9D00", shape: "crown" },  // dorado
+    { min: 25,  light: "#FBCFD8", dark: "#E96E87", shape: "crown" },  // rosa
+    { min: 10,  light: "#DEB2FF", dark: "#B664F6", shape: "crown" },  // morado
+    { min: 5,   light: "#2EFAD1", dark: "#00A18D", shape: "crown" },  // turquesa
+    { min: 1,   light: "#53FC18", dark: "#32970E", shape: "crown" },  // verde
+  ];
+
+  function getGifterBadgeColors(giftCount) {
+    for (const tier of GIFTER_BADGE_TIERS) {
+      if (giftCount >= tier.min) return tier;
+    }
+    return GIFTER_BADGE_TIERS[GIFTER_BADGE_TIERS.length - 1];
+  }
+
+  function getGifterBadgeSVG(giftCount) {
+    const { light, dark, shape, accent } = getGifterBadgeColors(giftCount);
+
+    if (shape === "bow") {
+      // Forma "moño sin brillos" (tier 900) — SVG real de Kick.
+      const ribbon = accent || dark;
+      const uid = Math.random().toString(36).slice(2, 9);
+      return `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_bow_${uid})"><path d="M0 6H32V12H0V6Z" fill="${light}"></path><path d="M2 16H30V32H2V16Z" fill="${light}"></path><path d="M30 12H2V16H30V12Z" fill="${dark}"></path><path d="M14 6L16 3L14 0H6L10 6H12H14Z" fill="${light}"></path><path d="M22 6H20V32H12V6H14L18 0H26L22 6Z" fill="${ribbon}"></path></g><defs><clipPath id="clip0_bow_${uid}"><rect width="32" height="32" fill="white"></rect></clipPath></defs></svg>`;
+    }
+
+    if (shape === "sparkle") {
+      // Forma "moño + brillos" (tiers 1000+) — SVG real de Kick. El color del
+      // moño (accent) varía por tier.
+      const ribbon = accent || "#BC66FF";
+      const uid = Math.random().toString(36).slice(2, 9);
+      return `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_sparkle_${uid})"><path d="M0.02 6H32.02V14H0.02V6Z" fill="${light}"></path><path d="M0.02 18H32.02V32H0.02V18Z" fill="${light}"></path><path d="M30.02 14H2.02V18H30.02V14Z" fill="${dark}"></path><path d="M22.02 6H20.02V32H12.02V6H14.02L18.02 0H26.02L22.02 6Z" fill="${ribbon}"></path><path d="M14.02 6L16.02 3L14.02 0H6.02L10.02 6H12.02H14.02Z" fill="white"></path><path d="M3.02 9L2.14 7.16C2.14 6.98 1.84 6.88 1.84 6.88L0 6L1.84 5.12L2.14 4.82L3.02 2.98L3.9 4.82C3.9 4.92 4 5.02 4.2 5.12L6.04 5.9L4.2 6.78C4 6.86 3.9 6.96 3.9 7.16L3.02 9Z" fill="white"></path><path d="M30.02 16L29.44 14.78C29.44 14.64 29.24 14.58 29.24 14.58L28.02 14L29.24 13.42L29.44 13.22L30.02 12L30.6 13.22C30.6 13.22 30.68 13.36 30.8 13.42L32.02 13.94L30.8 14.52C30.66 14.58 30.6 14.66 30.6 14.78L30.02 16Z" fill="white"></path></g><defs><clipPath id="clip0_sparkle_${uid}"><rect width="32" height="32" fill="white"></rect></clipPath></defs></svg>`;
+    }
+
+    if (shape === "box-tall") {
+      // Forma "caja alta con listón vertical" (tier 500) — SVG real de Kick.
+      return `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M30 18H2V32H30V18Z" fill="${light}"></path><path d="M30 8H2V14H30V8Z" fill="${light}"></path><path d="M10 8H12.5V14H4V18H12.5V32H19.5V18H28V14H19.5V8H22L26 2H18L16 5L14 2H6L10 8Z" fill="${dark}"></path></svg>`;
+    }
+
+    if (shape === "box") {
+      // Forma "caja con listón vertical" (tiers 100, 200) — SVG real de Kick.
+      return `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M30 10H2V28H30V10Z" fill="${light}"></path><path d="M12 10H10L6 4H14L16 7L18 4H26L22 10H20V28H12V10Z" fill="${dark}"></path></svg>`;
+    }
+
+    // Forma "corona" (tiers 1, 5, 10, 25, 50) — SVG real de Kick.
+    const uid = Math.random().toString(36).slice(2, 9); // evita choque de ids de clipPath si hay varios en el DOM
+    return `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_${uid})"><g clip-path="url(#clip1_${uid})"><path d="M22.34 9.5L26 4H18L16 7L14 4H6L9.66 9.5H4V15.1H28V9.5H22.34Z" fill="${light}"></path><path d="M26.0799 19.0996H5.8999V28.4996H26.0799V19.0996Z" fill="${light}"></path><path d="M26.0799 15.0996H5.8999V19.0996H26.0799V15.0996Z" fill="${dark}"></path></g></g><defs><clipPath id="clip0_${uid}"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath><clipPath id="clip1_${uid}"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath></defs></svg>`;
+  }
 
   const KICK_USERNAME_COLORS = [
     "#00ff66", "#53fc18", "#00c7ff", "#0095ff", "#1da1f2", "#00aeef",
@@ -506,7 +593,7 @@
       } else if (tipo === "sub_gifter") {
         const giftCount = b.count || b.gifted || b.amount || 0;
 
-        html += `<span class="badge-icon" title="Regaló ${giftCount} suscripciones" style="display:inline-flex;vertical-align:middle;margin-right:3px;">${KICK_GIFTER_BADGE_SVG}</span>`;
+        html += `<span class="badge-icon" title="Regaló ${giftCount} suscripciones" style="display:inline-flex;vertical-align:middle;margin-right:3px;">${getGifterBadgeSVG(giftCount)}</span>`;
       } else {
         const icon = KICK_BADGES[tipo];
         if (icon) {
@@ -1617,6 +1704,10 @@
   async function addMessage(m) {
     if (messageIds.has(m.id)) return;
     messageIds.add(m.id);
+
+    // 🔍 DEBUG TEMPORAL: para ver la estructura real de badges que manda Kick
+    // y detectar el duplicado del ícono de "gifter". Borrar cuando ya no se necesite.
+    console.log("BADGES:", JSON.stringify(m.identity?.badges || m.sender?.identity?.badges), "BADGES_V2:", JSON.stringify(m.identity?.badges_v2 || m.sender?.identity?.badges_v2), "user:", m.sender?.username);
 
     const username = m.sender?.username || "Anónimo";
     const kickUserId = m.sender?.id || "";
