@@ -1516,43 +1516,6 @@
     return result;
   }
 
-  function build7TVShadowStyles(shadowsData) {
-    const shadows = (shadowsData || [])
-      .map(s => {
-        const color = to7TVColor(s.color, "rgba(0,0,0,.85)");
-        const x = s.x_offset ?? s.offsetX ?? 0;
-        const y = s.y_offset ?? s.offsetY ?? 0;
-        const blur = s.radius ?? s.blur ?? 0;
-        return { x, y, blur, color };
-      });
-
-    if (!shadows.length) return "";
-
-    const textShadow = shadows
-      .map(s => `${s.x}px ${s.y}px ${s.blur}px ${s.color}`)
-      .join(", ");
-    const filterShadow = shadows
-      .map(s => `drop-shadow(${s.x}px ${s.y}px ${s.blur}px ${s.color})`)
-      .join(" ");
-
-    return ` text-shadow: ${textShadow}; filter: ${filterShadow};`;
-  }
-
-  function build7TVTextShadowStyle(shadowsData) {
-    const textShadow = (shadowsData || [])
-      .map(s => {
-        const color = to7TVColor(s.color, "rgba(0,0,0,.85)");
-        const x = s.x_offset ?? s.offsetX ?? 0;
-        const y = s.y_offset ?? s.offsetY ?? 0;
-        const blur = s.radius ?? s.blur ?? 0;
-        return `${x}px ${y}px ${blur}px ${color}`;
-      })
-      .filter(Boolean)
-      .join(", ");
-
-    return textShadow ? ` text-shadow: ${textShadow};` : "";
-  }
-
   function build7TVPaintBackgroundLayers(paint, base) {
     const backgroundLayers = [];
     const solidColors = [];
@@ -1574,10 +1537,12 @@
         const stops = ty.stops
           .map(s => `${to7TVColor(s.color, base)} ${Math.max(0, Math.min(1, Number(s.at || 0))) * 100}%`)
           .join(", ");
+        const isRepeating = !!(ty.repeating ?? layer.repeating ?? gradient.repeating);
+        const prefix = isRepeating ? "repeating-" : "";
         backgroundLayers.push(
           typeName.includes("RADIAL")
-            ? `radial-gradient(circle, ${stops})`
-            : `linear-gradient(${ty.angle || 90}deg, ${stops})`
+            ? `${prefix}radial-gradient(circle, ${stops})`
+            : `${prefix}linear-gradient(${ty.angle || 90}deg, ${stops})`
         );
         return;
       }
@@ -1605,10 +1570,12 @@
         .join(", ");
 
       if (stops) {
+        const isRepeatingFallback = !!(gradient.repeating ?? layer.repeating);
+        const prefixFallback = isRepeatingFallback ? "repeating-" : "";
         backgroundLayers.push(
           gradientFunction.includes("RADIAL")
-            ? `radial-gradient(${gradient.shape || "circle"}, ${stops})`
-            : `linear-gradient(${gradient.angle || 90}deg, ${stops})`
+            ? `${prefixFallback}radial-gradient(${gradient.shape || "circle"}, ${stops})`
+            : `${prefixFallback}linear-gradient(${gradient.angle || 90}deg, ${stops})`
         );
       }
     });
@@ -1636,7 +1603,7 @@
       ...(!paint.shadows?.length && !paint.text?.shadows?.length ? (paint.data?.shadows || []) : [])
     ];
 
-    // Construir filter drop-shadow igual que 7database
+    // filter: drop-shadow, igual que la implementacion de referencia de 7database.
     const filterParts = shadowsData.map(s => {
       const color = to7TVColor(s.color, "rgba(0,0,0,0.85)");
       const x = s.x_offset ?? s.offsetX ?? 0;
