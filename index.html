@@ -1603,15 +1603,34 @@
       ...(!paint.shadows?.length && !paint.text?.shadows?.length ? (paint.data?.shadows || []) : [])
     ];
 
-    // filter: drop-shadow, igual que la implementacion de referencia de 7database.
-    const filterParts = shadowsData.map(s => {
+    // text-shadow en vez de filter: drop-shadow(). El drop-shadow es un filtro que
+    // rasteriza el elemento y crea un nuevo stacking/filter context; anidado dentro
+    // de .msg (que ya trae su propio filter: drop-shadow para la sombra negra de todo
+    // el mensaje) esto produce recortes asimetricos del halo en Chrome/Kick embebido
+    // (se ve el brillo solo del lado derecho del nombre). text-shadow pinta el halo
+    // directamente sobre la forma de cada glifo, sin crear ese contexto anidado, así
+    // que sale parejo alrededor de todo el nombre — igual que el chat original de Kick
+    // (ver capturas de referencia: el glow rodea el nombre completo, no solo un lado).
+    // Funciona igual para color solido y para paints con gradiente/imagen: text-shadow
+    // no depende de -webkit-text-fill-color, se dibuja igual aunque el relleno sea
+    // transparente (truco estándar para "glow" sobre texto con background-clip: text).
+    const shadowParts = shadowsData.map(s => {
       const color = to7TVColor(s.color, "rgba(0,0,0,0.85)");
       const x = s.x_offset ?? s.offsetX ?? 0;
       const y = s.y_offset ?? s.offsetY ?? 0;
       const blur = s.radius ?? s.blur ?? 0;
-      return `drop-shadow(${color} ${x}px ${y}px ${blur}px)`;
+      return `${x}px ${y}px ${blur}px ${color}`;
     });
-    const filterStyle = filterParts.length ? `filter: ${filterParts.join(" ")};` : "";
+    // Duplicamos la capa de sombra cuando es un halo centrado (sin offset): un solo
+    // text-shadow con blur grande sale bastante tenue comparado con el glow real de
+    // Kick, que se ve mas intenso y solido. Repetir la misma sombra un par de veces
+    // (mismo truco que usa 7TV/Kick para "reforzar" el blur) da un halo mas parejo y
+    // con mas cuerpo sin tener que inventar un color o radio distinto.
+    const reinforcedShadowParts = shadowParts.flatMap(part => {
+      const isCentered = /^0px 0px /.test(part);
+      return isCentered ? [part, part] : [part];
+    });
+    const shadowStyle = reinforcedShadowParts.length ? `text-shadow: ${reinforcedShadowParts.join(", ")};` : "";
 
     let declarations;
 
@@ -1647,12 +1666,12 @@
         `background-clip: text;`,
         `-webkit-text-fill-color: transparent;`,
         `color: transparent;`,
-        filterStyle
+        shadowStyle
       ].filter(Boolean).join(" ");
     } else {
       // Solo color solido
       const color = solidColor || "var(--kick-name-color)";
-      declarations = `color: ${color}; -webkit-text-fill-color: ${color}; ${filterStyle}`;
+      declarations = `color: ${color}; -webkit-text-fill-color: ${color}; ${shadowStyle}`;
     }
 
     get7TVPaintStyleSheet().appendChild(document.createTextNode(`.${className}{${declarations}}\n`));
