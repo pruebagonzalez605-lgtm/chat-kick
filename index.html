@@ -348,13 +348,6 @@
     return `<svg width="18px" height="18px" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#clip0_${uid})"><g clip-path="url(#clip1_${uid})"><path d="M22.34 9.5L26 4H18L16 7L14 4H6L9.66 9.5H4V15.1H28V9.5H22.34Z" fill="${light}"></path><path d="M26.0799 19.0996H5.8999V28.4996H26.0799V19.0996Z" fill="${light}"></path><path d="M26.0799 15.0996H5.8999V19.0996H26.0799V15.0996Z" fill="${dark}"></path></g></g><defs><clipPath id="clip0_${uid}"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath><clipPath id="clip1_${uid}"><rect width="24" height="24.5" fill="white" transform="translate(4 4)"></rect></clipPath></defs></svg>`;
   }
 
-  const KICK_USERNAME_COLORS = [
-    "#00ff66", "#53fc18", "#00c7ff", "#0095ff", "#1da1f2", "#00aeef",
-    "#2f80ed", "#5865f2", "#8b5cf6", "#a855f7", "#d946ef", "#ff4ecd",
-    "#ff5c8a", "#ff3864", "#e9113c", "#ff6a4a", "#ff9500", "#ffc900",
-    "#facc15", "#22c55e", "#14b8a6", "#06b6d4"
-  ];
-
   const ENABLE_7TV_NAME_PAINTS = new URLSearchParams(window.location.search).get("paints") !== "off";
 
   const KICK_USERNAME_COLOR_NAMES = {
@@ -536,42 +529,45 @@
   }
 
   function generateBadges(m, cosmetics) {
-    let html = "";
     const kickBadges = m.identity?.badges || m.sender?.identity?.badges || [];
 
-    // badges_v2: array SEPARADO donde Kick manda badges "globales" (nivel, Flyby, etc.)
-    // con su image_url ya resuelta, distinto del array "badges" clásico.
-    // El NIVEL se muestra primero de todos. El resto (ej: Flyby) se muestra DESPUÉS
-    // de los badges clásicos (ej: Suscriptor -> Flyby), como en el chat real de Kick.
+    // badges_v2: array donde Kick manda TODOS los badges (clásicos + especiales
+    // como nivel, Flyby, badges globales tipo "espada", etc.) ya con image_url
+    // resuelta y, sobre todo, con "sort_order": el orden REAL en el que Kick
+    // los pinta en el chat. Antes pintábamos primero todo lo de "badges" (clásicos)
+    // y recién al final lo de "badges_v2", ignorando sort_order — por eso un badge
+    // global con sort_order bajo (ej: 4) terminaba último en vez de primero.
+    //
+    // Ahora: se arma UNA sola lista combinando "badges" (clásicos, con su lógica
+    // especial de tier de suscriptor y el ícono SVG de gifter) + "badges_v2"
+    // (para todo lo que no esté ya cubierto por "badges"), y se ordena por
+    // sort_order ascendente, igual que hace Kick.
     const kickBadgesV2 = m.identity?.badges_v2 || m.sender?.identity?.badges_v2 || [];
-    let levelHtml = "";
-    let badgesV2Html = "";
+
+    // Mapa tipo -> sort_order, sacado de badges_v2 (que sí trae el orden real)
+    const sortOrderByType = {};
     kickBadgesV2.forEach(b => {
-      const name = (b.name || "").toLowerCase();
-      if (name === "level" && b.image_url && b.selected !== false) {
-        const level = b.metadata?.level ?? "";
-        levelHtml += `<img src="${b.image_url}" alt="Nivel ${level}" class="badge-icon" title="Nivel ${level}">`;
-      } else if (b.image_url && b.selected !== false) {
-        // Cualquier otro badge_v2 (ej: Flyby u otros nuevos) que traiga su propia image_url
-        badgesV2Html += `<img src="${b.image_url}" alt="${b.name || 'badge'}" class="badge-icon" title="${b.name || 'badge'}">`;
-      } else {
-        console.log("🔍 DEBUG badge_v2 sin mapear (raw):", JSON.stringify(b));
-      }
+      const t = (b.type || b.name || "").toLowerCase();
+      if (t && typeof b.sort_order === "number") sortOrderByType[t] = b.sort_order;
     });
 
-    html += levelHtml;
+    const items = []; // { sortOrder, html }
+    const FALLBACK_SORT = 999; // por si algo no trae sort_order, va al final
 
+    // 1) Badges "clásicos" (necesitan su lógica especial: tier de suscriptor, SVG de gifter, etc.)
+    const renderedTypes = new Set();
     kickBadges.forEach(b => {
       const tipo = (b.type || "").toLowerCase();
+      const sortOrder = (typeof b.sort_order === "number") ? b.sort_order : (sortOrderByType[tipo] ?? FALLBACK_SORT);
+      let htmlPiece = "";
 
       if (isKickLevelBadge(b)) {
-        // Fallback legado: normalmente el nivel viene por badges_v2 (arriba), no por acá.
+        // Fallback legado: normalmente el nivel viene por badges_v2, no por acá.
         const levelUrl = getKickBadgeImageUrl(b);
         const levelNum = b.level || b.count || b.text || "";
         if (levelUrl) {
-          html += `<img src="${levelUrl}" alt="Nivel ${levelNum}" class="badge-icon" title="Nivel ${levelNum}">`;
+          htmlPiece = `<img src="${levelUrl}" alt="Nivel ${levelNum}" class="badge-icon" title="Nivel ${levelNum}">`;
         }
-        return;
       } else if (tipo === "subscriber") {
         const monthsRaw = b.months || b.count || b.level || b.duration || 1;
         const key = getSubBadgeKey(monthsRaw);
@@ -594,24 +590,50 @@
           badgeUrl = KICK_BADGES["subscriber"];
         }
 
-        html += `<img src="${badgeUrl}" alt="Suscriptor ${monthsRaw} meses" class="badge-icon" title="Suscriptor ${monthsRaw} meses (tier ${key})">`;
+        htmlPiece = `<img src="${badgeUrl}" alt="Suscriptor ${monthsRaw} meses" class="badge-icon" title="Suscriptor ${monthsRaw} meses (tier ${key})">`;
       } else if (tipo === "sub_gifter") {
         const giftCount = b.count || b.gifted || b.amount || 0;
-
-        html += `<span class="badge-icon" title="Regaló ${giftCount} suscripciones" style="display:inline-flex;vertical-align:middle;margin-right:3px;">${getGifterBadgeSVG(giftCount)}</span>`;
+        htmlPiece = `<span class="badge-icon" title="Regaló ${giftCount} suscripciones" style="display:inline-flex;vertical-align:middle;margin-right:3px;">${getGifterBadgeSVG(giftCount)}</span>`;
       } else {
         const icon = KICK_BADGES[tipo];
         if (icon) {
-          html += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
+          htmlPiece = `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
         } else {
           console.log("🔍 DEBUG badge sin mapear (raw):", JSON.stringify(b));
         }
       }
+
+      if (htmlPiece) {
+        if (tipo) renderedTypes.add(tipo);
+        items.push({ sortOrder, html: htmlPiece });
+      }
     });
 
-    html += badgesV2Html;
+    // 2) badges_v2: todo lo que NO haya sido ya pintado desde "badges" clásico
+    // (nivel, Flyby, badges globales especiales tipo "espada", etc.)
+    kickBadgesV2.forEach(b => {
+      if (b.selected === false) return;
+      const name = (b.name || b.type || "").toLowerCase();
+      if (renderedTypes.has(name)) return; // ya cubierto arriba con su lógica especial
+      if (!b.image_url) {
+        console.log("🔍 DEBUG badge_v2 sin mapear (raw):", JSON.stringify(b));
+        return;
+      }
 
-    // 7TV badges
+      const sortOrder = (typeof b.sort_order === "number") ? b.sort_order : FALLBACK_SORT;
+      const alt = (name === "level")
+        ? `Nivel ${b.metadata?.level ?? ""}`
+        : (b.name || "badge");
+
+      items.push({ sortOrder, html: `<img src="${b.image_url}" alt="${escapeHTML(alt)}" class="badge-icon" title="${escapeHTML(alt)}">` });
+    });
+
+    // Orden ascendente por sort_order, igual que Kick
+    items.sort((a, b) => a.sortOrder - b.sortOrder);
+
+    let html = items.map(i => i.html).join("");
+
+    // 7TV badges siempre al final (no vienen de Kick, no tienen sort_order de Kick)
     if (cosmetics?.badges?.length) {
       cosmetics.badges.forEach(b => {
         const url = get7TVAssetUrl(b);
@@ -696,15 +718,6 @@
     return fallback;
   }
 
-  function pickByUsername(username, options) {
-    const text = String(username || "");
-    let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-      hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
-    }
-    return options[Math.abs(hash) % options.length];
-  }
-
   function normalizeKickUsernameColor(value, fallback = null) {
     if (typeof value === "string") {
       const namedColor = KICK_USERNAME_COLOR_NAMES[value.trim().toLowerCase()];
@@ -769,8 +782,14 @@
       if (color) return { color, explicit: true };
     }
 
+    // Si Kick NO manda un color explícito para este chatter, en el chat real
+    // ese nombre sale en blanco/gris (el mismo color que el texto del mensaje),
+    // NO con un color "parecido" inventado. Antes acá se adivinaba un color
+    // por hash del username (KICK_USERNAME_COLORS) y por eso nombres como
+    // EBOB6, xxxo, jamesId9 o arvinbijan (que en Kick real salen en blanco)
+    // terminaban con colores random que no coincidían con el chat real.
     return {
-      color: pickByUsername(sender.username || m.username, KICK_USERNAME_COLORS),
+      color: "var(--text)",
       explicit: false
     };
   }
@@ -1333,6 +1352,66 @@
     }
   `;
 
+  // Consulta de refuerzo: cuando la API v3 (legado) solo nos da el "paint_id"
+  // suelto (sin capas/gradiente) y ese paint no está en el catálogo global de
+  // 7TV (paints "de sitio" comunes a cualquier usuario), pero YA sabemos el ID
+  // interno de 7TV del usuario (nos lo dio la propia respuesta v3), intentamos
+  // pedir su paint COMPLETO directo por ID de usuario vía v4. Esto rescata
+  // paints personalizados/exclusivos de un chatter puntual que "userByConnection"
+  // no siempre resuelve pero "user(id:)" sí.
+  const SEVENTV_USER_BY_ID_STYLE_QUERY = `
+    query($id: ID!) {
+      users {
+        user(id: $id) {
+          id
+          style {
+            activePaint {
+              id name
+              data {
+                layers {
+                  id opacity
+                  ty {
+                    __typename
+                    ... on PaintLayerTypeSingleColor { color { hex r g b a } }
+                    ... on PaintLayerTypeLinearGradient { angle repeating stops { at color { hex r g b a } } }
+                    ... on PaintLayerTypeRadialGradient { repeating shape stops { at color { hex r g b a } } }
+                    ... on PaintLayerTypeImage { images { url scale mime } }
+                  }
+                }
+                shadows { color { hex r g b a } offsetX offsetY blur }
+              }
+            }
+            activeBadge { id name images { url scale mime } }
+          }
+        }
+      }
+    }
+  `;
+
+  // Un paint "stub" es el que solo trae {id} (o id+name) sin ninguna capa,
+  // gradiente ni color propio: no alcanza para pintar nada y termina
+  // mostrando el nombre en un color plano (el color normal de Kick) en vez
+  // del paint real. Pasa cuando la API v3 (legado) solo nos da el paint_id
+  // suelto y ese paint no es uno "global" (catálogo compartido).
+  function isStubPaint(paint) {
+    if (!paint?.id) return false;
+    if (get7TVPaintLayers(paint).length) return false;
+    if (paint.color != null) return false;
+    if (paint.gradients?.length) return false;
+    return true;
+  }
+
+  async function fetchFullPaintById(sevenTvUserId) {
+    if (!sevenTvUserId) return null;
+    try {
+      const data = await fetch7TVGraphQL(SEVENTV_USER_BY_ID_STYLE_QUERY, { id: String(sevenTvUserId) });
+      return data?.users?.user?.style?.activePaint || null;
+    } catch (err) {
+      console.warn("7TV: fallback por ID de usuario falló:", sevenTvUserId, err);
+      return null;
+    }
+  }
+
   function normalize7TVGraphQLUser(data, kickUserId, username) {
     const exact = data?.byConnection?.userByConnection;
     const items = data?.bySearch?.search?.items || [];
@@ -1401,6 +1480,19 @@
         paint: pickActive7TVPaint(data.user),
         badges: pickActive7TVBadges(data.user)
       };
+
+      // Si la v3 solo nos dio el ID del paint (sin capas/gradiente) y no es un
+      // paint "global" conocido, probamos a buscarlo directo por el ID interno
+      // de 7TV de este usuario (data.user.id) antes de resignarnos al color plano.
+      if (isStubPaint(cosmetics.paint)) {
+        const fullPaint = await fetchFullPaintById(data.user.id);
+        if (fullPaint) {
+          cosmetics.paint = fullPaint;
+        } else {
+          console.log("🔍 DEBUG 7TV paint sin datos visuales (stub), username:", username, "paint_id:", cosmetics.paint.id, "7tv_user_id:", data.user.id);
+        }
+      }
+
       cosmetics.paint = await enrich7TVPaintFromGlobal(cosmetics.paint);
       const merged = merge7TVCosmetics(entitlementCosmetics, cosmetics);
       seventvUserCache[cacheKey] = { value: merged, time: Date.now() };
@@ -1539,10 +1631,16 @@
           .join(", ");
         const isRepeating = !!(ty.repeating ?? layer.repeating ?? gradient.repeating);
         const prefix = isRepeating ? "repeating-" : "";
+        // OJO: usar "?? 90" y NO "|| 90". Un paint con angle literal 0 (de abajo
+        // hacia arriba, como "Epiphany") es un valor válido, pero 0 es "falsy" en
+        // JS, así que "ty.angle || 90" lo reemplazaba por 90deg y rotaba mal el
+        // degradado — esa era la causa de que el color no se pareciera en nada
+        // al original (ver captura del editor de 7database, angle 0deg).
+        const tyAngle = ty.angle ?? 90;
         backgroundLayers.push(
           typeName.includes("RADIAL")
             ? `${prefix}radial-gradient(circle, ${stops})`
-            : `${prefix}linear-gradient(${ty.angle || 90}deg, ${stops})`
+            : `${prefix}linear-gradient(${tyAngle}deg, ${stops})`
         );
         return;
       }
@@ -1572,10 +1670,13 @@
       if (stops) {
         const isRepeatingFallback = !!(gradient.repeating ?? layer.repeating);
         const prefixFallback = isRepeatingFallback ? "repeating-" : "";
+        // Mismo cuidado acá: "?? 90", no "|| 90" (angle: 0 es válido y no debe
+        // caer al fallback de 90deg).
+        const fallbackAngle = gradient.angle ?? 90;
         backgroundLayers.push(
           gradientFunction.includes("RADIAL")
             ? `${prefixFallback}radial-gradient(${gradient.shape || "circle"}, ${stops})`
-            : `${prefixFallback}linear-gradient(${gradient.angle || 90}deg, ${stops})`
+            : `${prefixFallback}linear-gradient(${fallbackAngle}deg, ${stops})`
         );
       }
     });
