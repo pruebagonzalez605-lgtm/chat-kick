@@ -355,6 +355,7 @@
     "#facc15", "#22c55e", "#14b8a6", "#06b6d4"
   ];
 
+  const DEBUG = new URLSearchParams(window.location.search).has("debug");
   const ENABLE_7TV_NAME_PAINTS = new URLSearchParams(window.location.search).get("paints") !== "off";
 
   const KICK_USERNAME_COLOR_NAMES = {
@@ -391,46 +392,26 @@
     return `${baseUrl}?channel=${encodeURIComponent(channelName)}`;
   }
 
-  async function fetchDirect(url, timeout = 5000) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const PROXIES = [u => CORS_PROXY + encodeURIComponent(u), u => CORS_PROXY_FALLBACK + encodeURIComponent(u)];
+
+  async function fetchJSON(url, timeout = 8000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
-      const res = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }, signal: controller.signal, cache: 'no-store' });
-      clearTimeout(timeoutId);
+      const res = await fetch(url, { headers: { Accept: "application/json" }, signal: ctrl.signal, cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
-    } catch (err) {
-      clearTimeout(timeoutId);
-      throw err;
-    }
+    } finally { clearTimeout(timer); }
   }
 
-  async function fetchWithProxy(url, timeout = 5000) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-    try {
-      const proxyUrl = CORS_PROXY + encodeURIComponent(url);
-      const res = await fetch(proxyUrl, { signal: controller.signal, cache: 'no-store' });
-      clearTimeout(timeoutId);
-      return await res.json();
-    } catch (err) {
-      clearTimeout(timeoutId);
-      try {
-        const fallbackUrl = CORS_PROXY_FALLBACK + encodeURIComponent(url);
-        const res2 = await fetch(fallbackUrl, { signal: controller.signal, cache: 'no-store' });
-        clearTimeout(timeoutId);
-        return await res2.json();
-      } catch (err2) {
-        clearTimeout(timeoutId);
-        throw err2;
-      }
-    }
+  // Directo primero; si Kick/Cloudflare lo bloquea, los proxies van EN PARALELO (gana el primero que responda bien).
+  // Cada intento tiene su propio timeout (antes compartían uno y el fallback nacía abortado).
+  async function smartFetch(url, timeout = 8000) {
+    try { return await fetchJSON(url, timeout); } catch {}
+    try { return await Promise.any(PROXIES.map(p => fetchJSON(p(url), timeout))); }
+    catch (e) { throw new Error(e?.errors?.[0]?.message || e?.message || "sin respuesta"); }
   }
-
-  async function raceFetch(url) {
-    return Promise.race([fetchDirect(url).catch(() => null), fetchWithProxy(url).catch(() => null)]).then(r => r || fetchWithProxy(url));
-  }
-
-  const smartFetch = raceFetch;
+  const raceFetch = smartFetch;
 
   // ============ CARGAR BADGES DE SUSCRIPTOR ============
   // Kick devuelve este badge genérico cuando el canal NO tiene sub-badges propios.
@@ -555,7 +536,7 @@
         // Cualquier otro badge_v2 (ej: Flyby u otros nuevos) que traiga su propia image_url
         badgesV2Html += `<img src="${b.image_url}" alt="${b.name || 'badge'}" class="badge-icon" title="${b.name || 'badge'}">`;
       } else {
-        console.log("🔍 DEBUG badge_v2 sin mapear (raw):", JSON.stringify(b));
+        if (DEBUG) console.log("🔍 DEBUG badge_v2 sin mapear (raw):", JSON.stringify(b));
       }
     });
 
@@ -604,7 +585,7 @@
         if (icon) {
           html += `<img src="${icon}" alt="${tipo}" title="${b.text || tipo}" class="badge-icon">`;
         } else {
-          console.log("🔍 DEBUG badge sin mapear (raw):", JSON.stringify(b));
+          if (DEBUG) console.log("🔍 DEBUG badge sin mapear (raw):", JSON.stringify(b));
         }
       }
     });
@@ -637,7 +618,9 @@
   };
   const injected7TVPaintClasses = new Set();
   const injected7TVPaintOverlays = {};
-  const SEVENTV_USER_CACHE_TTL = 30 * 1000;
+  const SEVENTV_USER_CACHE_TTL = 10 * 60 * 1000;
+  const seventvInflight = {};
+  let local7TVProxyOk = true;
 
   function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, ch => ({
@@ -951,7 +934,7 @@
   }
 
   async function fetch7TVGraphQL(query, variables) {
-    const endpoints = location.protocol.startsWith("http")
+    const endpoints = (location.protocol.startsWith("http") && local7TVProxyOk)
       ? ["/api/7tv/gql", "https://7tv.io/v4/gql"]
       : ["https://7tv.io/v4/gql"];
 
@@ -959,7 +942,7 @@
 
     for (const endpoint of endpoints) {
       try {
-        const res = await fetch(endpoint, {
+        const res = await fetch(endpoint, { signal: AbortSignal.timeout?.(6000),
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "application/json" },
           body: JSON.stringify({ query, variables }),
@@ -972,6 +955,7 @@
         return json.data;
       } catch (err) {
         lastError = err;
+        if (endpoint.startsWith("/")) local7TVProxyOk = false;
       }
     }
 
@@ -1174,6 +1158,10 @@
       .map(String);
   }
 
+  function invalidate7TVUserCache(userId) {
+    Object.keys(seventvUserCache).forEach(k => { if (k.startsWith(`${userId}:`)) delete seventvUserCache[k]; });
+  }
+
   function upsert7TVEntitlement(kickUserIds, kind, refId) {
     kickUserIds.forEach(userId => {
       const current = seventvChannelCosmetics.entitlements[userId] || {};
@@ -1181,7 +1169,7 @@
         ...current,
         [kind === "BADGE" ? "badge" : "paint"]: refId
       };
-      delete seventvUserCache[`${userId}:`];
+      invalidate7TVUserCache(userId);
     });
   }
 
@@ -1193,7 +1181,7 @@
       if (current[key] === refId) {
         seventvChannelCosmetics.entitlements[userId] = { ...current, [key]: undefined };
       }
-      delete seventvUserCache[`${userId}:`];
+      invalidate7TVUserCache(userId);
     });
   }
 
@@ -1363,7 +1351,20 @@
     };
   }
 
-  async function fetch7TVUserCosmetics(kickUserId, username = "") {
+  function fetch7TVUserCosmetics(kickUserId, username = "") {
+    const key = `${kickUserId || ""}:${(username || "").toLowerCase()}`;
+    if (!seventvInflight[key]) {
+      seventvInflight[key] = fetch7TVUserCosmeticsRaw(kickUserId, username).finally(() => { delete seventvInflight[key]; });
+    }
+    return seventvInflight[key];
+  }
+
+  function peek7TVCosmetics(kickUserId, username = "") {
+    const c = seventvUserCache[`${kickUserId || ""}:${(username || "").toLowerCase()}`];
+    return merge7TVCosmetics(get7TVCosmeticsFromEntitlements(kickUserId), c && Date.now() - c.time < SEVENTV_USER_CACHE_TTL ? c.value : null);
+  }
+
+  async function fetch7TVUserCosmeticsRaw(kickUserId, username = "") {
     const normalizedUsername = username?.toLowerCase() || "";
     const cacheKey = `${kickUserId || ""}:${normalizedUsername}`;
     const entitlementCosmetics = get7TVCosmeticsFromEntitlements(kickUserId);
@@ -1393,7 +1394,7 @@
     }
 
     try {
-      const data = await smartFetch(`https://7tv.io/v3/users/kick/${kickUserId}`);
+      const data = await fetchJSON(`https://7tv.io/v3/users/kick/${kickUserId}`);
       if (!data?.user) {
         throw new Error("7TV v3 user not found");
       }
@@ -1413,7 +1414,7 @@
 
   async function loadFFZData() {
     try {
-      const data = await raceFetch("https://api.frankerfacez.com/v1/set/global");
+      const data = await fetchJSON("https://api.frankerfacez.com/v1/set/global");
       if (data.sets) {
         Object.values(data.sets).forEach(set => {
           set.emoticons.forEach(e => {
@@ -1429,7 +1430,7 @@
 
   async function loadBTTVData() {
     try {
-      const data = await smartFetch("https://api.betterttv.net/3/cached/emotes/global");
+      const data = await fetchJSON("https://api.betterttv.net/3/cached/emotes/global");
       data.forEach(e => {
         emotesData.bttv.global[e.code] = {
           url: `https://cdn.betterttv.net/emote/${e.id}/2x`,
@@ -1441,7 +1442,7 @@
 
   async function load7TVData() {
     try {
-      const data = await smartFetch("https://7tv.io/v3/emote-sets/global");
+      const data = await fetchJSON("https://7tv.io/v3/emote-sets/global");
       data.emotes?.forEach(e => {
         const host = e.data.host;
         const file = host.files.find(f => f.format === 'WEBP') || host.files[0];
@@ -1458,7 +1459,7 @@
   async function loadChannelCustom7TVSets() {
     try {
       // Usa el user_id del streamer en Kick para obtener los emotes del canal en 7TV
-      const data = await smartFetch(`https://7tv.io/v3/users/kick/${STREAMER_USER_ID}`);
+      const data = await fetchJSON(`https://7tv.io/v3/users/kick/${STREAMER_USER_ID}`);
       const emoteSet = data?.emote_set || data?.user?.emote_set;
       emoteSet?.emotes?.forEach(e => {
         const host = e.data?.host;
@@ -1485,35 +1486,40 @@
       loadBTTVData(),
       load7TVData()
     ]);
+    emoteMap = null;
     return { emoteSetId };
   }
 
+  // Un solo Map (antes: miles de RegExp compiladas y ordenadas por CADA mensaje).
+  // Prioridad: 7TV canal > 7TV global > BTTV > FFZ.
+  let emoteMap = null;
+  function buildEmoteMap() {
+    emoteMap = new Map();
+    [emotesData.ffz.global, emotesData.bttv.global, emotesData.seventv.global, emotesData.seventv.community]
+      .forEach(set => Object.entries(set).forEach(([code, e]) => emoteMap.set(code, e)));
+  }
+
+  function renderPlainText(seg) {
+    return seg.split(/(\s+)/).map(tok => {
+      const e = emoteMap.get(tok);
+      if (!e) return escapeHTML(tok);
+      const c = escapeHTML(tok);
+      return `<img src="${escapeHTML(e.url)}" srcset="${escapeHTML(e.url)} 1x, ${escapeHTML(e.url2x || e.url)} 2x" class="emote-third" alt="${c}" title="${c}">`;
+    }).join("");
+  }
+
+  // El contenido del chat es texto de viewers: SIEMPRE se escapa (antes iba directo a innerHTML).
   function processEmotes(text) {
     if (!text) return "";
-    let result = text;
-
-    // Kick native emotes
-    result = result.replace(/\[emote:(\d+):([^\]]+)\]/g, (_, id) => 
-      `<img src="https://files.kick.com/emotes/${id}/fullsize" class="emote">`
-    );
-
-    // 7TV community → global → bttv → ffz (orden de prioridad inverso al largo)
-    [
-      ...Object.entries(emotesData.seventv.community),
-      ...Object.entries(emotesData.seventv.global),
-      ...Object.entries(emotesData.bttv.global),
-      ...Object.entries(emotesData.ffz.global)
-    ]
-    .sort((a,b) => b[0].length - a[0].length)
-    .forEach(([code, emote]) => {
-      const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      result = result.replace(
-        new RegExp(`(?<!<[^>]*>)\\b${escaped}\\b(?![^<]*>)`, 'g'),
-        `<img src="${emote.url}" srcset="${emote.url} 1x, ${emote.url2x || emote.url} 2x" class="emote-third" alt="${code}" title="${code}">`
-      );
-    });
-
-    return result;
+    if (!emoteMap) buildEmoteMap();
+    let out = "", last = 0, m;
+    const re = /\[emote:(\d+):([^\]]+)\]/g;
+    while ((m = re.exec(text))) {
+      out += renderPlainText(text.slice(last, m.index));
+      out += `<img src="https://files.kick.com/emotes/${m[1]}/fullsize" class="emote" alt="${escapeHTML(m[2])}">`;
+      last = m.index + m[0].length;
+    }
+    return out + renderPlainText(text.slice(last));
   }
 
   function build7TVPaintBackgroundLayers(paint, base) {
@@ -1542,7 +1548,7 @@
         backgroundLayers.push(
           typeName.includes("RADIAL")
             ? `${prefix}radial-gradient(circle, ${stops})`
-            : `${prefix}linear-gradient(${ty.angle || 90}deg, ${stops})`
+            : `${prefix}linear-gradient(${ty.angle ?? 90}deg, ${stops})`
         );
         return;
       }
@@ -1575,7 +1581,7 @@
         backgroundLayers.push(
           gradientFunction.includes("RADIAL")
             ? `${prefixFallback}radial-gradient(${gradient.shape || "circle"}, ${stops})`
-            : `${prefixFallback}linear-gradient(${gradient.angle || 90}deg, ${stops})`
+            : `${prefixFallback}linear-gradient(${gradient.angle ?? 90}deg, ${stops})`
         );
       }
     });
@@ -1673,64 +1679,91 @@
     };
   }
 
-  async function addMessage(m) {
-    if (messageIds.has(m.id)) return;
-    messageIds.add(m.id);
+  // ============ MENSAJES ============
+  const MAX_MESSAGES = 150;   // tope en el DOM: sin esto OBS crece sin parar y termina cayéndose
+  const MAX_SEEN_IDS = 3000;
 
-    // 🔍 DEBUG TEMPORAL: para ver la estructura real de badges que manda Kick
-    // y detectar el duplicado del ícono de "gifter". Borrar cuando ya no se necesite.
-    console.log("BADGES:", JSON.stringify(m.identity?.badges || m.sender?.identity?.badges), "BADGES_V2:", JSON.stringify(m.identity?.badges_v2 || m.sender?.identity?.badges_v2), "user:", m.sender?.username);
+  function rememberMessageId(id) {
+    messageIds.add(id);
+    if (messageIds.size > MAX_SEEN_IDS) messageIds.delete(messageIds.values().next().value);
+  }
+  function trimChat() { while (chatDiv.childElementCount > MAX_MESSAGES) chatDiv.firstElementChild.remove(); }
+  function scrollToBottom() { chatDiv.scrollTo({ top: chatDiv.scrollHeight, behavior: "instant" }); }
+  function removeMessages(attr, value) {
+    chatDiv.querySelectorAll(`[data-${attr}="${CSS.escape(String(value))}"]`).forEach(el => el.remove());
+  }
 
+  function applyCosmetics(msg, m, cosmetics) {
+    const badgesEl = msg.querySelector(".badges");
+    const nameEl = msg.querySelector(".username-text");
+    if (!badgesEl || !nameEl) return;
+    const paint = generateNamePaint(m, cosmetics);
+    const paintName = cosmetics?.paint?.name || "";
+    const badgeNames = cosmetics?.badges?.map(b => b.name || b.tooltip).filter(Boolean).join(", ") || "";
+    badgesEl.innerHTML = generateBadges(m, cosmetics);
+    nameEl.className = `username-text ${paint.className}`.trim();
+    nameEl.setAttribute("style", paint.style);
+    nameEl.setAttribute("data-7tv-paint-direct", paint.hasDirect ? "true" : "false");
+    nameEl.setAttribute("data-7tv-paint", paintName);
+    nameEl.title = [paintName && `7TV paint: ${paintName}`, badgeNames && `7TV badge: ${badgeNames}`].filter(Boolean).join(" | ");
+  }
+
+  // Síncrono: el mensaje sale al instante y EN ORDEN. 7TV (paint/badges) se aplica después
+  // cuando responde (antes cada mensaje esperaba a 7TV y salían desordenados/tarde).
+  function addMessage(m, container = chatDiv) {
+    if (!m?.id || messageIds.has(m.id)) return null;
+    rememberMessageId(m.id);
     const username = m.sender?.username || "Anónimo";
     const kickUserId = m.sender?.id || "";
 
-    const cosmetics = await fetch7TVUserCosmetics(kickUserId, username);
-
-    const badgesHTML = generateBadges(m, cosmetics);
-    const namePaint = generateNamePaint(m, cosmetics);
-    const paintName = cosmetics?.paint?.name || "";
-    const badgeNames = cosmetics?.badges?.map(b => b.name || b.tooltip).filter(Boolean).join(", ") || "";
-    const cosmeticsTitle = [paintName && `7TV paint: ${paintName}`, badgeNames && `7TV badge: ${badgeNames}`].filter(Boolean).join(" | ");
-    const content = processEmotes(m.content);
-
     const msg = document.createElement("div");
     msg.className = "msg";
-    msg.innerHTML = `<span class="meta"><span class="user">${badgesHTML}<span class="username-text ${escapeHTML(namePaint.className)}" data-username="${escapeHTML(username)}" data-7tv-paint-direct="${namePaint.hasDirect ? "true" : "false"}" data-7tv-paint="${escapeHTML(paintName)}" title="${escapeHTML(cosmeticsTitle)}" style="${namePaint.style}">${escapeHTML(username)}</span></span></span><span class="text">${content}</span>`;
+    msg.dataset.id = m.id;
+    msg.dataset.sender = kickUserId;
+    msg.innerHTML = `<span class="meta"><span class="user"><span class="badges"></span><span class="username-text" data-username="${escapeHTML(username)}">${escapeHTML(username)}</span></span></span><span class="text">${processEmotes(m.content)}</span>`;
+    applyCosmetics(msg, m, peek7TVCosmetics(kickUserId, username));
 
-    chatDiv.appendChild(msg);
-    chatDiv.scrollTop = chatDiv.scrollHeight;
+    container.appendChild(msg);
+    if (container === chatDiv) { trimChat(); scrollToBottom(); }
+
+    fetch7TVUserCosmetics(kickUserId, username)
+      .then(c => { if (c) applyCosmetics(msg, m, c); })
+      .catch(() => {});
+    return msg;
   }
+
+  // ============ CANAL ============
+  function readCachedChannel(slug) { try { return JSON.parse(localStorage.getItem(`kickchat:ch:${slug}`)); } catch { return null; } }
+  function cacheChannel(slug, info) { try { localStorage.setItem(`kickchat:ch:${slug}`, JSON.stringify(info)); } catch {} }
 
   async function getChannelId(channelSlug) {
     statusMsg.textContent = "Obteniendo canal...";
     statusMsg.style.color = "#53fc18";
+    const cached = readCachedChannel(channelSlug);
+
+    // ?chatroom=ID salta la consulta a Kick (útil si Cloudflare te bloquea la API)
+    const forced = new URLSearchParams(location.search).get("chatroom");
+    if (forced && /^\d+$/.test(forced)) {
+      return { channelId: cached?.channelId ?? null, chatroomId: Number(forced), isLive: false, userId: cached?.userId ?? null };
+    }
+
     try {
-      // Intentamos v2 primero (tiene user_id que necesitamos para 7TV)
       let data = null;
-      try {
-        data = await smartFetch(`https://kick.com/api/v2/channels/${channelSlug}`);
-      } catch {}
+      try { data = await smartFetch(`https://kick.com/api/v2/channels/${channelSlug}`); } catch {}
+      if (!data?.id || !data?.chatroom?.id) data = await smartFetch(`https://kick.com/api/v1/channels/${channelSlug}`);
+      // Antes no se validaba: sin chatroom.id se suscribía a "chatrooms.undefined.v2" y el chat quedaba mudo sin error.
+      if (!data?.id || !data?.chatroom?.id) throw new Error("Kick no devolvió el chatroom");
 
-      // Fallback a v1 si v2 falla
-      if (!data?.id) {
-        data = await smartFetch(`https://kick.com/api/v1/channels/${channelSlug}`);
-      }
-
-      const userId = data.user_id || data.user?.id || null;
-
-      return {
-        channelId: data.id,
-        chatroomId: data.chatroom?.id,
-        isLive: !!data.livestream?.id,
-        userId
-      };
+      const info = { channelId: data.id, chatroomId: data.chatroom.id, isLive: !!data.livestream?.id, userId: data.user_id || data.user?.id || null };
+      cacheChannel(channelSlug, info);   // el chatroom id no cambia: sirve de respaldo si Kick falla luego
+      return info;
     } catch (err) {
-      statusMsg.textContent = "Error: " + err.message;
-      statusMsg.style.color = "#ff4444";
+      if (cached?.chatroomId) return { ...cached, isLive: false };
       throw err;
     }
   }
 
+  let loadSeq = 0;
   async function loadChat() {
     const channelName = channelInput.value.trim().toLowerCase();
     if (!channelName) {
@@ -1739,114 +1772,158 @@
       return;
     }
 
-    try {
-      const result = await getChannelId(channelName);
-      CHANNEL_ID = result.channelId;
-      CHATROOM_ID = result.chatroomId;
-      STREAMER_USER_ID = result.userId || result.channelId; // fallback al channelId si no hay userId
-      currentChannel = channelName;
-      CHAT_URL = `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages`;
-
-      await loadChannelSubBadges(channelName);
-      const thirdPartyData = await loadAllThirdPartyData();
-      connect7TVCosmeticsEvents(STREAMER_USER_ID, thirdPartyData.emoteSetId);
-
-      const isDirectLink = getUrlParams() !== null;
-      if (isDirectLink) {
-        inputContainer.style.display = "none";
-        chatDiv.style.display = "flex";
-      } else {
-        statusMsg.textContent = result.isLive ? `🔴 EN VIVO: ${channelName}` : `⚫ OFFLINE: ${channelName}`;
-        statusMsg.style.color = result.isLive ? "#53fc18" : "#ffaa00";
-        generatedLink.value = generateLink(channelName);
-        linkContainer.style.display = "block";
-        channelInput.style.display = "none";
-        loadBtn.style.display = "none";
-        chatDiv.style.display = "flex";
+    const seq = ++loadSeq;
+    let result = null;
+    for (let attempt = 1; seq === loadSeq; attempt++) {   // reintenta solo, con espera creciente
+      try { result = await getChannelId(channelName); break; }
+      catch (err) {
+        const wait = Math.min(30, attempt * 3);
+        statusMsg.textContent = `No se pudo obtener el canal (${err.message}). Reintentando en ${wait}s...`;
+        statusMsg.style.color = "#ff4444";
+        await new Promise(r => setTimeout(r, wait * 1000));
       }
-
-      chatDiv.innerHTML = "";
-      messageIds.clear();
-
-      connectWebSocket();
-      fetchInitialMessages();
-    } catch (err) {
-      console.error(err);
     }
+    if (!result || seq !== loadSeq) return;
+
+    CHANNEL_ID = result.channelId;
+    CHATROOM_ID = result.chatroomId;
+    STREAMER_USER_ID = result.userId || result.channelId;
+    currentChannel = channelName;
+    CHAT_URL = CHANNEL_ID ? `https://kick.com/api/v2/channels/${CHANNEL_ID}/messages` : null;
+
+    if (getUrlParams() !== null) {
+      inputContainer.style.display = "none";
+    } else {
+      statusMsg.textContent = result.isLive ? `🔴 EN VIVO: ${channelName}` : `⚫ OFFLINE: ${channelName}`;
+      statusMsg.style.color = result.isLive ? "#53fc18" : "#ffaa00";
+      generatedLink.value = generateLink(channelName);
+      linkContainer.style.display = "block";
+      channelInput.style.display = "none";
+      loadBtn.style.display = "none";
+    }
+    chatDiv.style.display = "flex";
+    chatDiv.innerHTML = "";
+    messageIds.clear();
+
+    // El chat en vivo conecta YA; emotes, sub-badges y 7TV cargan en segundo plano (antes lo bloqueaban).
+    connectWebSocket();
+    loadChannelSubBadges(channelName).catch(e => console.warn(e));
+    loadAllThirdPartyData()
+      .then(d => connect7TVCosmeticsEvents(STREAMER_USER_ID, d.emoteSetId))
+      .catch(e => console.warn("Emotes/7TV:", e));
+    fetchInitialMessages().catch(e => console.warn("Historial:", e));
   }
+
+  // ============ WEBSOCKET (Pusher) ============
+  let wsGen = 0, wsAttempt = 0, wsTimer = null, wsWatchdog = null, wsLastActivity = 0, wsActivityMs = 120000;
+  const wsSend = (ws, obj) => { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch {} };
 
   function connectWebSocket() {
-    if (kickWS) kickWS.close();
-    kickWS = new WebSocket(PUSHER_WS_URL);
+    clearTimeout(wsTimer);
+    clearInterval(wsWatchdog);
+    if (!CHATROOM_ID) return;
+    const gen = ++wsGen;
+    // Al cerrar el socket viejo, su "close" ya NO dispara otra reconexión (gen distinto).
+    // Antes ese close reconectaba -> cerraba el nuevo -> bucle infinito y, con error+close, se duplicaba.
+    if (kickWS) { const old = kickWS; kickWS = null; try { old.close(); } catch {} }
 
-    kickWS.addEventListener("open", () => {
-      kickWS.send(JSON.stringify({
-        event: "pusher:subscribe",
-        data: { auth: "", channel: `chatrooms.${CHATROOM_ID}.v2` }
-      }));
+    const ws = new WebSocket(PUSHER_WS_URL);
+    kickWS = ws;
+
+    const scheduleReconnect = () => {
+      if (gen !== wsGen) return;          // error + close llegan juntos: solo UNA reconexión
+      wsGen++;
+      clearInterval(wsWatchdog);
+      try { ws.close(); } catch {}
+      const delay = Math.min(30000, 1000 * 2 ** Math.min(wsAttempt++, 5)) + Math.random() * 500;
+      console.warn(`Chat desconectado, reintentando en ${Math.round(delay / 1000)}s`);
+      wsTimer = setTimeout(connectWebSocket, delay);
+    };
+
+    ws.addEventListener("open", () => {
+      wsLastActivity = Date.now();
+      wsSend(ws, { event: "pusher:subscribe", data: { auth: "", channel: `chatrooms.${CHATROOM_ID}.v2` } });
     });
 
-    kickWS.addEventListener("message", (event) => {
+    ws.addEventListener("message", ev => {
+      wsLastActivity = Date.now();
       try {
-        const parsed = JSON.parse(event.data);
-        if (parsed.event === "App\\Events\\ChatMessageEvent") {
-          const data = JSON.parse(parsed.data);
-          addMessage({
-            id: data.id,
-            content: data.content,
-            sender: data.sender,
-            identity: data.sender.identity
-          });
+        const parsed = JSON.parse(ev.data);
+        let data = parsed.data;
+        if (typeof data === "string") { try { data = JSON.parse(data); } catch {} }
+        switch (parsed.event) {
+          case "pusher:connection_established":
+            wsAttempt = 0;
+            if (data?.activity_timeout) wsActivityMs = data.activity_timeout * 1000;
+            break;
+          case "pusher:ping":   // sin este pong Pusher cierra la conexión cada ~2 min
+            wsSend(ws, { event: "pusher:pong", data: {} });
+            break;
+          case "pusher:error":
+            console.warn("Pusher error:", data);
+            break;
+          case "App\\Events\\ChatMessageEvent":
+            if (data?.sender) addMessage({ id: data.id, content: data.content, sender: data.sender, identity: data.sender.identity, created_at: data.created_at });
+            break;
+          case "App\\Events\\MessageDeletedEvent":
+            if (data?.message?.id) removeMessages("id", data.message.id);
+            break;
+          case "App\\Events\\UserBannedEvent":
+            if (data?.user?.id) removeMessages("sender", data.user.id);
+            break;
+          case "App\\Events\\ChatroomClearEvent":
+            chatDiv.innerHTML = "";
+            break;
         }
-      } catch {}
+      } catch (e) { if (DEBUG) console.warn("WS mensaje inválido:", e); }
     });
 
-    kickWS.addEventListener("error", () => setTimeout(connectWebSocket, 1500));
-    kickWS.addEventListener("close", () => setTimeout(connectWebSocket, 1500));
+    ws.addEventListener("error", scheduleReconnect);
+    ws.addEventListener("close", scheduleReconnect);
+
+    // Perro guardián: detecta conexiones "zombie" (sin error ni close) y las reinicia.
+    wsWatchdog = setInterval(() => {
+      if (gen !== wsGen) return;
+      const idle = Date.now() - wsLastActivity;
+      if (idle > wsActivityMs + 30000) scheduleReconnect();
+      else if (idle > wsActivityMs) wsSend(ws, { event: "pusher:ping", data: {} });
+    }, 10000);
   }
 
-async function fetchInitialMessages() {
-  if (!CHAT_URL) return;
+  window.addEventListener("online", () => {
+    if (CHATROOM_ID && (!kickWS || kickWS.readyState > 1)) { wsAttempt = 0; connectWebSocket(); }
+  });
 
-  let url = CHAT_URL;
-  let loaded = 0;
-  const MAX_PAGES = 3;      // intenta hasta 3 páginas (ajusta según rate-limit)
-  const MESSAGES_PER_PAGE = 100; // suposición
+  // ============ HISTORIAL ============
+  // ?history=0..3 (páginas, default 1). Se ordena por fecha y se antepone: los mensajes en vivo
+  // que ya llegaron quedan abajo (antes el historial salía revuelto y la paginación pedía "before" del más NUEVO).
+  async function fetchInitialMessages() {
+    if (!CHAT_URL) return;
+    const pages = Math.max(0, Math.min(3, parseInt(new URLSearchParams(location.search).get("history") ?? "1", 10) || 0));
+    const all = [];
+    let url = CHAT_URL;
 
-  for (let page = 0; page < MAX_PAGES; page++) {
-    try {
-      const data = await raceFetch(url);
-      const msgs = data?.data?.messages || data?.messages || [];
-
-      if (!msgs.length) break;
-
-      msgs.reverse().forEach(m => {
-        if (!messageIds.has(m.id)) {
-          addMessage(m);
-          loaded++;
-        }
-      });
-
-      // Intento de paginación (cambia según lo que veas en Network tab)
-      // Ejemplos probados por gente: ?before={last_id}  o  ?cursor={next_cursor}
-      const lastMsg = msgs[msgs.length - 1];
-      if (!lastMsg?.id) break;
-
-      url = `${CHAT_URL}?before=${lastMsg.id}`;  // ← prueba este parámetro primero
-      // Alternativas a probar si no funciona:
-      // url = `${CHAT_URL}?cursor=${lastMsg.id}`;
-      // url = `${CHAT_URL}?limit=100&before_id=${lastMsg.id}`;
-
-      await new Promise(r => setTimeout(r, 800)); // delay anti-rate-limit
-    } catch (e) {
-      console.warn("Error en página de historial", page, e);
-      break;
+    for (let i = 0; i < pages; i++) {
+      try {
+        const data = await smartFetch(url);
+        const msgs = data?.data?.messages || data?.messages || [];
+        if (!msgs.length) break;
+        all.push(...msgs);
+        const oldest = msgs.reduce((a, b) => (Date.parse(b.created_at) < Date.parse(a.created_at) ? b : a));
+        url = `${CHAT_URL}?before=${oldest.id}`;
+        if (i < pages - 1) await new Promise(r => setTimeout(r, 800));
+      } catch (e) { console.warn("Historial no disponible:", e.message); break; }
     }
-  }
 
-  console.log(`Cargados ${loaded} mensajes iniciales`);
-  statusMsg.textContent += ` | ${loaded} mensajes históricos cargados`;
-}
+    all.sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
+    const frag = document.createDocumentFragment();
+    let loaded = 0;
+    all.forEach(m => { if (addMessage(m, frag)) loaded++; });
+    chatDiv.prepend(frag);
+    trimChat();
+    scrollToBottom();
+    if (DEBUG) console.log(`Cargados ${loaded} mensajes iniciales`);
+  }
 
   // Eventos
   copyLinkBtn.addEventListener("click", async () => {
