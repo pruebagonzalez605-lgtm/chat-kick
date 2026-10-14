@@ -406,8 +406,12 @@
 
   // Directo primero; si Kick/Cloudflare lo bloquea, los proxies van EN PARALELO (gana el primero que responda bien).
   // Cada intento tiene su propio timeout (antes compartían uno y el fallback nacía abortado).
+  const directBlocked = new Set();
   async function smartFetch(url, timeout = 8000) {
-    try { return await fetchJSON(url, timeout); } catch {}
+    let host = ""; try { host = new URL(url).hostname; } catch {}
+    if (!directBlocked.has(host)) {
+      try { return await fetchJSON(url, timeout); } catch { directBlocked.add(host); }
+    }
     try { return await Promise.any(PROXIES.map(p => fetchJSON(p(url), timeout))); }
     catch (e) { throw new Error(e?.errors?.[0]?.message || e?.message || "sin respuesta"); }
   }
@@ -1806,16 +1810,21 @@
     messageIds.clear();
 
     // El chat en vivo conecta YA; emotes, sub-badges y 7TV cargan en segundo plano (antes lo bloqueaban).
-    connectWebSocket();
+    clearTimeout(pollTimer); pollTimer = null; wsFatal = false; historyDone = false;
+    if (RELAY_MODE) connectRelay(); else connectWebSocket();
     loadChannelSubBadges(channelName).catch(e => console.warn(e));
     loadAllThirdPartyData()
       .then(d => connect7TVCosmeticsEvents(STREAMER_USER_ID, d.emoteSetId))
       .catch(e => console.warn("Emotes/7TV:", e));
-    fetchInitialMessages().catch(e => console.warn("Historial:", e));
+    fetchInitialMessages().catch(e => console.warn("Historial:", e))
+      .finally(() => { historyDone = true; if (wsFatal) startPolling(); });
   }
 
   // ============ WEBSOCKET (Pusher) ============
   let wsGen = 0, wsAttempt = 0, wsTimer = null, wsWatchdog = null, wsLastActivity = 0, wsActivityMs = 120000;
+  let wsFatal = false, historyDone = false, pollTimer = null, pollFails = 0;
+  const POLL_MS = Math.max(2000, parseInt(new URLSearchParams(location.search).get("poll") || "3000", 10) || 3000);
+  const RELAY_MODE = ["localhost", "127.0.0.1"].includes(location.hostname);
   const wsSend = (ws, obj) => { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch {} };
 
   function connectWebSocket() {
@@ -1861,18 +1870,15 @@
             break;
           case "pusher:error":
             console.warn("Pusher error:", data);
+            if (data?.code >= 4000 && data.code < 4100) {   // Kick cerró su Pusher: reconectar no sirve
+              wsFatal = true; wsGen++;
+              clearInterval(wsWatchdog);
+              try { ws.close(); } catch {}
+              if (historyDone) startPolling();
+            }
             break;
-          case "App\\Events\\ChatMessageEvent":
-            if (data?.sender) addMessage({ id: data.id, content: data.content, sender: data.sender, identity: data.sender.identity, created_at: data.created_at });
-            break;
-          case "App\\Events\\MessageDeletedEvent":
-            if (data?.message?.id) removeMessages("id", data.message.id);
-            break;
-          case "App\\Events\\UserBannedEvent":
-            if (data?.user?.id) removeMessages("sender", data.user.id);
-            break;
-          case "App\\Events\\ChatroomClearEvent":
-            chatDiv.innerHTML = "";
+          default:
+            handleKickEvent(parsed.event, data);
             break;
         }
       } catch (e) { if (DEBUG) console.warn("WS mensaje inválido:", e); }
@@ -1888,6 +1894,58 @@
       if (idle > wsActivityMs + 30000) scheduleReconnect();
       else if (idle > wsActivityMs) wsSend(ws, { event: "pusher:ping", data: {} });
     }, 10000);
+  }
+
+  // ============ CHAT EN VIVO POR CONSULTA PERIÓDICA ============
+  // Kick migró a Centrifugo y su servidor de tiempo real rechaza sockets que no vengan de kick.com.
+  // Mientras tanto se consulta el endpoint de mensajes cada POLL_MS (?poll=ms, mínimo 2000);
+  // los repetidos se descartan por id. Si falla, espera más antes de reintentar.
+  function startPolling() {
+    if (pollTimer || !CHAT_URL) return;
+    console.warn(`Chat en vivo por consulta cada ${POLL_MS / 1000}s (Kick cerró Pusher)`);
+    const tick = async () => {
+      try {
+        const data = await smartFetch(CHAT_URL, 6000);
+        const msgs = (data?.data?.messages || data?.messages || []).slice()
+          .sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
+        msgs.forEach(m => addMessage(m));
+        pollFails = 0;
+      } catch (e) { pollFails++; if (DEBUG) console.warn("Poll falló:", e.message); }
+      pollTimer = setTimeout(tick, Math.min(20000, POLL_MS * (1 + pollFails)));
+    };
+    pollTimer = setTimeout(tick, POLL_MS);
+  }
+
+  function handleKickEvent(event, data) {
+    switch (event) {
+      case "App\\Events\\ChatMessageEvent":
+        if (data?.sender) addMessage({ id: data.id, content: data.content, sender: data.sender, identity: data.sender.identity, created_at: data.created_at });
+        break;
+      case "App\\Events\\MessageDeletedEvent":
+        if (data?.message?.id) removeMessages("id", data.message.id);
+        break;
+      case "App\\Events\\UserBannedEvent":
+        if (data?.user?.id) removeMessages("sender", data.user.id);
+        break;
+      case "App\\Events\\ChatroomClearEvent":
+        chatDiv.innerHTML = "";
+        break;
+    }
+  }
+
+  // ============ MODO RELAY (tiempo real vía userscript + relay.js) ============
+  // Kick (Centrifugo) solo deja conectar sockets con origen kick.com, así que el userscript
+  // corre en tu pestaña de kick.com y reenvía los mensajes al relay local; aquí se reciben por SSE.
+  let relayES = null;
+  function connectRelay() {
+    if (relayES || !window.EventSource) return;
+    relayES = new EventSource("/events");
+    relayES.onmessage = ev => {
+      let batch; try { batch = JSON.parse(ev.data); } catch { return; }
+      (Array.isArray(batch) ? batch : [batch]).forEach(it => {
+        if (it?.channel === `chatrooms.${CHATROOM_ID}.v2`) handleKickEvent(it.event, it.data);
+      });
+    };
   }
 
   window.addEventListener("online", () => {
