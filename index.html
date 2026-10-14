@@ -1823,7 +1823,7 @@
   // ============ WEBSOCKET (Pusher) ============
   let wsGen = 0, wsAttempt = 0, wsTimer = null, wsWatchdog = null, wsLastActivity = 0, wsActivityMs = 120000;
   let wsFatal = false, historyDone = false, pollTimer = null, pollFails = 0;
-  const POLL_MS = Math.max(2000, parseInt(new URLSearchParams(location.search).get("poll") || "3000", 10) || 3000);
+  const POLL_MS = Math.max(1000, parseInt(new URLSearchParams(location.search).get("poll") || "1500", 10) || 1500);
   const RELAY_MODE = ["localhost", "127.0.0.1"].includes(location.hostname);
   const wsSend = (ws, obj) => { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch {} };
 
@@ -1904,16 +1904,24 @@
     if (pollTimer || !CHAT_URL) return;
     console.warn(`Chat en vivo por consulta cada ${POLL_MS / 1000}s (Kick cerró Pusher)`);
     const tick = async () => {
+      const t0 = Date.now();
       try {
-        const data = await smartFetch(CHAT_URL, 6000);
+        // "_" único por petición: evita que proxies/CDN devuelvan una copia vieja
+        // (y que la copia en caché, que responde más rápido, gane la carrera entre proxies).
+        const data = await smartFetch(`${CHAT_URL}?_=${t0}`, 6000);
         const msgs = (data?.data?.messages || data?.messages || []).slice()
           .sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
-        msgs.forEach(m => addMessage(m));
+        msgs.forEach(m => {
+          const el = addMessage(m);
+          if (el && DEBUG) console.log(`retraso del mensaje: ${((Date.now() - Date.parse(m.created_at)) / 1000).toFixed(1)}s`);
+        });
         pollFails = 0;
       } catch (e) { pollFails++; if (DEBUG) console.warn("Poll falló:", e.message); }
-      pollTimer = setTimeout(tick, Math.min(20000, POLL_MS * (1 + pollFails)));
+      // Ritmo fijo (descuenta lo que tardó la petición); si falla, espera más.
+      const wait = pollFails ? Math.min(20000, POLL_MS * (1 + pollFails)) : Math.max(0, POLL_MS - (Date.now() - t0));
+      pollTimer = setTimeout(tick, wait);
     };
-    pollTimer = setTimeout(tick, POLL_MS);
+    pollTimer = setTimeout(tick, 0);
   }
 
   function handleKickEvent(event, data) {
