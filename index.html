@@ -407,13 +407,18 @@
   // Directo primero; si Kick/Cloudflare lo bloquea, los proxies van EN PARALELO (gana el primero que responda bien).
   // Cada intento tiene su propio timeout (antes compartían uno y el fallback nacía abortado).
   const directBlocked = new Set();
+  let proxyPref = 0;
   async function smartFetch(url, timeout = 8000) {
     let host = ""; try { host = new URL(url).hostname; } catch {}
     if (!directBlocked.has(host)) {
       try { return await fetchJSON(url, timeout); } catch { directBlocked.add(host); }
     }
-    try { return await Promise.any(PROXIES.map(p => fetchJSON(p(url), timeout))); }
-    catch (e) { throw new Error(e?.errors?.[0]?.message || e?.message || "sin respuesta"); }
+    const first = proxyPref;
+    try { return await fetchJSON(PROXIES[first](url), Math.min(timeout, 4000)); } catch {}
+    try {
+      const rest = PROXIES.map((_, i) => i).filter(i => i !== first);
+      return await Promise.any(rest.map(i => fetchJSON(PROXIES[i](url), timeout).then(d => { proxyPref = i; return d; })));
+    } catch (e) { throw new Error(e?.errors?.[0]?.message || e?.message || "sin respuesta"); }
   }
   const raceFetch = smartFetch;
 
@@ -1684,7 +1689,7 @@
   }
 
   // ============ MENSAJES ============
-  const MAX_MESSAGES = 150;   // tope en el DOM: sin esto OBS crece sin parar y termina cayéndose
+  const MAX_MESSAGES = Math.max(20, parseInt(new URLSearchParams(location.search).get("max") || "80", 10) || 80);   // tope en el DOM: sin esto OBS crece sin parar y termina cayéndose
   const MAX_SEEN_IDS = 3000;
 
   function rememberMessageId(id) {
@@ -1810,8 +1815,8 @@
     messageIds.clear();
 
     // El chat en vivo conecta YA; emotes, sub-badges y 7TV cargan en segundo plano (antes lo bloqueaban).
-    clearTimeout(pollTimer); pollTimer = null; wsFatal = false; historyDone = false;
-    if (RELAY_MODE) connectRelay(); else connectWebSocket();
+    clearTimeout(pollTimer); pollTimer = null; pollOn = false; wsFatal = false; historyDone = false;
+    if (RELAY_MODE) connectRelay(); else if (WS_TRY) connectWebSocket(); else wsFatal = true;
     loadChannelSubBadges(channelName).catch(e => console.warn(e));
     loadAllThirdPartyData()
       .then(d => connect7TVCosmeticsEvents(STREAMER_USER_ID, d.emoteSetId))
@@ -1822,8 +1827,9 @@
 
   // ============ WEBSOCKET (Pusher) ============
   let wsGen = 0, wsAttempt = 0, wsTimer = null, wsWatchdog = null, wsLastActivity = 0, wsActivityMs = 120000;
-  let wsFatal = false, historyDone = false, pollTimer = null, pollFails = 0;
+  let wsFatal = false, historyDone = false, pollTimer = null, pollFails = 0, pollOn = false, pollRunning = false, pollLast = 0, pollWatch = null;
   const POLL_MS = Math.max(1000, parseInt(new URLSearchParams(location.search).get("poll") || "1500", 10) || 1500);
+  const WS_TRY = new URLSearchParams(location.search).has("ws");
   const RELAY_MODE = ["localhost", "127.0.0.1"].includes(location.hostname);
   const wsSend = (ws, obj) => { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch {} };
 
@@ -1900,28 +1906,41 @@
   // Kick migró a Centrifugo y su servidor de tiempo real rechaza sockets que no vengan de kick.com.
   // Mientras tanto se consulta el endpoint de mensajes cada POLL_MS (?poll=ms, mínimo 2000);
   // los repetidos se descartan por id. Si falla, espera más antes de reintentar.
-  function startPolling() {
-    if (pollTimer || !CHAT_URL) return;
-    console.warn(`Chat en vivo por consulta cada ${POLL_MS / 1000}s (Kick cerró Pusher)`);
-    const tick = async () => {
-      const t0 = Date.now();
-      try {
-        // "_" único por petición: evita que proxies/CDN devuelvan una copia vieja
-        // (y que la copia en caché, que responde más rápido, gane la carrera entre proxies).
-        const data = await smartFetch(`${CHAT_URL}?_=${t0}`, 6000);
-        const msgs = (data?.data?.messages || data?.messages || []).slice()
-          .sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
-        msgs.forEach(m => {
+  async function pollTick() {
+    if (pollRunning && Date.now() - pollLast < 15000) return;   // ya hay un ciclo en marcha
+    clearTimeout(pollTimer);
+    pollRunning = true;
+    const t0 = pollLast = Date.now();
+    try {
+      // "_" único: evita copias viejas en proxies/CDN
+      const data = await smartFetch(`${CHAT_URL}?_=${t0}`, 6000);
+      const msgs = (data?.data?.messages || data?.messages || []).slice()
+        .sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0));
+      msgs.forEach(m => {
+        try {   // un mensaje raro no debe tumbar el ciclo entero
           const el = addMessage(m);
           if (el && DEBUG) console.log(`retraso del mensaje: ${((Date.now() - Date.parse(m.created_at)) / 1000).toFixed(1)}s`);
-        });
-        pollFails = 0;
-      } catch (e) { pollFails++; if (DEBUG) console.warn("Poll falló:", e.message); }
-      // Ritmo fijo (descuenta lo que tardó la petición); si falla, espera más.
-      const wait = pollFails ? Math.min(20000, POLL_MS * (1 + pollFails)) : Math.max(0, POLL_MS - (Date.now() - t0));
-      pollTimer = setTimeout(tick, wait);
-    };
-    pollTimer = setTimeout(tick, 0);
+        } catch (e) { console.warn("Mensaje con error:", e); }
+      });
+      pollFails = 0;
+    } catch (e) { pollFails++; if (DEBUG) console.warn("Poll falló:", e.message); }
+    pollRunning = false;
+    if (!pollOn) return;
+    const wait = pollFails ? Math.min(8000, POLL_MS * (1 + pollFails)) : Math.max(0, POLL_MS - (Date.now() - t0));
+    pollTimer = setTimeout(pollTick, wait);
+  }
+
+  function startPolling() {
+    if (pollOn || !CHAT_URL) return;
+    pollOn = true;
+    console.warn(`Chat en vivo por consulta cada ${POLL_MS / 1000}s`);
+    pollTimer = setTimeout(pollTick, 0);
+    if (!pollWatch) {
+      // Vigilante: si el navegador congela los timers o un ciclo se cuelga, se reanuda solo.
+      pollWatch = setInterval(() => { if (pollOn && Date.now() - pollLast > 20000) pollTick(); }, 5000);
+      document.addEventListener("visibilitychange", () => { if (pollOn && !document.hidden) pollTick(); });
+      window.addEventListener("online", () => { if (pollOn) pollTick(); });
+    }
   }
 
   function handleKickEvent(event, data) {
