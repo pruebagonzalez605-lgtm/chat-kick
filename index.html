@@ -70,7 +70,6 @@
       background: transparent;
       box-shadow: none;
       filter: drop-shadow(2px 2px 0.2rem black);
-      transition: all 0.25s ease;
       opacity: 0;
       transform: translateY(5px);
       animation: fadeUp 0.3s ease forwards;
@@ -406,12 +405,13 @@
 
   // Directo primero; si Kick/Cloudflare lo bloquea, los proxies van EN PARALELO (gana el primero que responda bien).
   // Cada intento tiene su propio timeout (antes compartían uno y el fallback nacía abortado).
-  const directBlocked = new Set();
+  const directBlocked = new Map();   // host -> timestamp; expira para reintentar directo (un fallo suelto ya no lo bloquea para siempre)
+  const DIRECT_RETRY_MS = 45000;
   let proxyPref = 0;
   async function smartFetch(url, timeout = 8000) {
     let host = ""; try { host = new URL(url).hostname; } catch {}
-    if (!directBlocked.has(host)) {
-      try { return await fetchJSON(url, timeout); } catch { directBlocked.add(host); }
+    if (!directBlocked.has(host) || Date.now() - directBlocked.get(host) > DIRECT_RETRY_MS) {
+      try { const d = await fetchJSON(url, timeout); directBlocked.delete(host); return d; } catch { directBlocked.set(host, Date.now()); }
     }
     const first = proxyPref;
     try { return await fetchJSON(PROXIES[first](url), Math.min(timeout, 4000)); } catch {}
@@ -1696,7 +1696,15 @@
     messageIds.add(id);
     if (messageIds.size > MAX_SEEN_IDS) messageIds.delete(messageIds.values().next().value);
   }
-  function trimChat() { while (chatDiv.childElementCount > MAX_MESSAGES) chatDiv.firstElementChild.remove(); }
+  function trimChat() {
+    while (chatDiv.childElementCount > MAX_MESSAGES) chatDiv.firstElementChild.remove();
+    // mensajes totalmente fuera de pantalla (arriba): ya no se ven, solo gastan render
+    let first = chatDiv.firstElementChild;
+    while (first && chatDiv.childElementCount > 15 && first.offsetTop + first.offsetHeight < chatDiv.scrollTop - 200) {
+      first.remove();
+      first = chatDiv.firstElementChild;
+    }
+  }
   function scrollToBottom() { chatDiv.scrollTo({ top: chatDiv.scrollHeight, behavior: "instant" }); }
   function removeMessages(attr, value) {
     chatDiv.querySelectorAll(`[data-${attr}="${CSS.escape(String(value))}"]`).forEach(el => el.remove());
@@ -1937,8 +1945,8 @@
     pollTimer = setTimeout(pollTick, 0);
     if (!pollWatch) {
       // Vigilante: si el navegador congela los timers o un ciclo se cuelga, se reanuda solo.
-      pollWatch = setInterval(() => { if (pollOn && Date.now() - pollLast > 20000) pollTick(); }, 5000);
-      document.addEventListener("visibilitychange", () => { if (pollOn && !document.hidden) pollTick(); });
+      pollWatch = setInterval(() => { if (pollOn && Date.now() - pollLast > 8000) pollTick(); }, 4000);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) { if (pollOn) pollTick(); scrollToBottom(); } });
       window.addEventListener("online", () => { if (pollOn) pollTick(); });
     }
   }
